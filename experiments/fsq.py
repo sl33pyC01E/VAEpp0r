@@ -141,6 +141,8 @@ def train(args):
         encoder_channels=enc_ch, decoder_channels=dec_ch,
         encoder_time_downscale=etd, decoder_time_upscale=dtu,
     ).to(device)
+    if args.grad_checkpoint:
+        vae.use_checkpoint = True
 
     src_sd = ckpt["model"] if "model" in ckpt else ckpt
     target_sd = vae.state_dict()
@@ -215,7 +217,13 @@ def train(args):
     amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16,
                  "fp32": torch.float32}[args.precision]
 
-    print(f"Steps: {args.total_steps}, LR: {args.lr}, Batch: {args.batch_size}",
+    gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
+    accum = args.grad_accum
+
+    print(f"Steps: {args.total_steps}, LR: {args.lr}, "
+          f"Batch: {args.batch_size}"
+          f"{f', accum={accum}' if accum > 1 else ''}"
+          f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}",
           flush=True)
     print(f"Weights: w_mse={args.w_mse}, w_commit={args.w_commit}", flush=True)
     print(flush=True)
@@ -236,36 +244,46 @@ def train(args):
                 stop_file.unlink()
             break
 
-        images = gen.generate(args.batch_size)
-        x = images.unsqueeze(1).to(device)  # (B, 1, C, H, W)
-
         vae.train()
         opt.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast("cuda", dtype=amp_dtype):
-            # Encode → quantize → decode
-            lat = vae.encode_video(x).squeeze(1)  # (B, C, H, W)
-            lat_q, indices = fsq_layer(lat)
-            recon = vae.decode_video(lat_q.unsqueeze(1))
+        for _ai in range(accum):
+            if gen_bs < args.batch_size:
+                chunks = []
+                rem = args.batch_size
+                while rem > 0:
+                    n = min(gen_bs, rem)
+                    chunks.append(gen.generate(n))
+                    rem -= n
+                images = torch.cat(chunks)
+            else:
+                images = gen.generate(args.batch_size)
+            x = images.unsqueeze(1).to(device)  # (B, 1, C, H, W)
 
-            # Align temporal
-            T_out = recon.shape[1]
-            gt = x[:, -T_out:]
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                # Encode → quantize → decode
+                lat = vae.encode_video(x).squeeze(1)  # (B, C, H, W)
+                lat_q, indices = fsq_layer(lat)
+                recon = vae.decode_video(lat_q.unsqueeze(1))
 
-            # Reconstruction loss
-            mse = F.mse_loss(recon, gt)
+                # Align temporal
+                T_out = recon.shape[1]
+                gt = x[:, -T_out:]
 
-            # Commitment loss (push encoder output toward quantized)
-            commit = F.mse_loss(lat, lat_q.detach())
+                # Reconstruction loss
+                mse = F.mse_loss(recon, gt)
 
-            total = args.w_mse * mse + args.w_commit * commit
+                # Commitment loss (push encoder output toward quantized)
+                commit = F.mse_loss(lat, lat_q.detach())
 
-        total.backward()
+                total = args.w_mse * mse + args.w_commit * commit
+
+            (total / accum).backward()
+            del lat, lat_q, recon, images, x
+
         torch.nn.utils.clip_grad_norm_(vae.parameters(), 1.0)
         opt.step()
         sched.step()
-
-        del lat, lat_q, recon, images, x
 
         if step % args.log_every == 0:
             el = time.time() - t0
@@ -362,6 +380,13 @@ def main():
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=1000)
     p.add_argument("--preview-every", type=int, default=100)
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="Gradient accumulation steps (effective batch = batch-size * grad-accum)")
+    p.add_argument("--gen-batch", type=int, default=0,
+                   help="Generator batch size (0 = same as batch-size). "
+                        "Lower to reduce generator VRAM.")
+    p.add_argument("--grad-checkpoint", action="store_true",
+                   help="Gradient checkpointing (trade compute for memory)")
     p.add_argument("--resume", default=None)
     p.add_argument("--fresh-opt", action="store_true")
     args = p.parse_args()

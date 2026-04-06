@@ -126,8 +126,11 @@ def train(args):
         encoder_time_downscale=(True, True, False),
         decoder_time_upscale=(False, True, True),
     ).to(device)
+    if args.grad_checkpoint:
+        model.use_checkpoint = True
     pc = model.param_count()
-    print(f"MiniVAE (3ch, temporal 4x): {pc['total']:,} params")
+    print(f"MiniVAE (3ch, temporal 4x): {pc['total']:,} params"
+          f"{', grad-checkpoint' if args.grad_checkpoint else ''}")
     print(f"  t_downscale={model.t_downscale}, t_upscale={model.t_upscale}, "
           f"frames_to_trim={model.frames_to_trim}")
 
@@ -222,8 +225,13 @@ def train(args):
     scaler = torch.amp.GradScaler("cuda",
                                    enabled=(args.precision == "fp16"))
 
+    gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
+    accum = args.grad_accum
+
     print(f"Steps: {args.total_steps}, LR: {args.lr}, "
-          f"Batch: {args.batch_size}, T: {args.T}")
+          f"Batch: {args.batch_size}, T: {args.T}"
+          f"{f', accum={accum}' if accum > 1 else ''}"
+          f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}")
     print(f"Weights: mse={args.w_mse} lpips={args.w_lpips} "
           f"temporal={args.w_temporal}")
     print(f"Precision: {args.precision}, Device: {device}")
@@ -247,60 +255,71 @@ def train(args):
             print("[Stop detected, saving...]", flush=True)
             break
 
-        # Sample from motion pool (fast) or generate fresh (slow)
-        clips = gen.generate_from_pool(args.batch_size)  # (B, T, 3, H, W)
-        x = clips.to(device)
-
         model.train()
         opt.zero_grad(set_to_none=True)
+        losses = {}
 
-        with torch.amp.autocast("cuda", dtype=amp_dtype):
-            recon, latent = model(x)
+        for _ai in range(accum):
+            # Sample from motion pool (fast) or generate fresh (slow)
+            if gen_bs < args.batch_size:
+                chunks = []
+                rem = args.batch_size
+                while rem > 0:
+                    n = min(gen_bs, rem)
+                    chunks.append(gen.generate_from_pool(n))
+                    rem -= n
+                clips = torch.cat(chunks)
+            else:
+                clips = gen.generate_from_pool(args.batch_size)  # (B, T, 3, H, W)
+            x = clips.to(device)
 
-            # Align temporal
-            T_out = recon.shape[1]
-            T_in = x.shape[1]
-            T_match = min(T_out, T_in)
-            gt = x[:, T_in - T_match:]
-            rc = recon[:, T_out - T_match:]
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                recon, latent = model(x)
 
-            # MSE loss
-            mse = F.mse_loss(rc, gt)
-            losses = {"mse": mse.item()}
+                # Align temporal
+                T_out = recon.shape[1]
+                T_in = x.shape[1]
+                T_match = min(T_out, T_in)
+                gt = x[:, T_in - T_match:]
+                rc = recon[:, T_out - T_match:]
 
-            total = args.w_mse * mse
+                # MSE loss
+                mse = F.mse_loss(rc, gt)
+                losses["mse"] = mse.item()
 
-            # Temporal consistency loss
-            if T_match >= 2:
-                gt_diff = gt[:, 1:] - gt[:, :-1]
-                rc_diff = rc[:, 1:] - rc[:, :-1]
-                temp = F.l1_loss(rc_diff, gt_diff)
-                total = total + args.w_temporal * temp
-                losses["temp"] = temp.item()
+                total = args.w_mse * mse
 
-            # LPIPS (per-frame, on RGB)
-            if lpips_fn is not None:
-                BT = rc.shape[0] * T_match
-                rc_lp = rc.reshape(BT, 3, args.H, args.W) * 2 - 1
-                gt_lp = gt.reshape(BT, 3, args.H, args.W) * 2 - 1
-                lp_chunks = []
-                for ci in range(0, BT, 4):
-                    lp_chunks.append(lpips_fn(rc_lp[ci:ci+4], gt_lp[ci:ci+4]))
-                lp = torch.cat(lp_chunks, 0).mean()
-                total = total + args.w_lpips * lp
-                losses["lpips"] = lp.item()
+                # Temporal consistency loss
+                if T_match >= 2:
+                    gt_diff = gt[:, 1:] - gt[:, :-1]
+                    rc_diff = rc[:, 1:] - rc[:, :-1]
+                    temp = F.l1_loss(rc_diff, gt_diff)
+                    total = total + args.w_temporal * temp
+                    losses["temp"] = temp.item()
 
-        if total.dim() > 0:
-            total = total.mean()
+                # LPIPS (per-frame, on RGB)
+                if lpips_fn is not None:
+                    BT = rc.shape[0] * T_match
+                    rc_lp = rc.reshape(BT, 3, args.H, args.W) * 2 - 1
+                    gt_lp = gt.reshape(BT, 3, args.H, args.W) * 2 - 1
+                    lp_chunks = []
+                    for ci in range(0, BT, 4):
+                        lp_chunks.append(lpips_fn(rc_lp[ci:ci+4], gt_lp[ci:ci+4]))
+                    lp = torch.cat(lp_chunks, 0).mean()
+                    total = total + args.w_lpips * lp
+                    losses["lpips"] = lp.item()
 
-        scaler.scale(total).backward()
+            if total.dim() > 0:
+                total = total.mean()
+
+            scaler.scale(total / accum).backward()
+            del clips, x, recon, latent, rc, gt
+
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt)
         scaler.update()
         sched.step()
-
-        del recon, latent, rc, gt, clips, x
         global_step += 1
 
         # -- Log --
@@ -394,6 +413,13 @@ def main():
     p.add_argument("--n-layers", type=int, default=128)
     p.add_argument("--pool-size", type=int, default=200)
     p.add_argument("--alpha", type=float, default=3.0)
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="Gradient accumulation steps (effective batch = batch-size * grad-accum)")
+    p.add_argument("--gen-batch", type=int, default=0,
+                   help="Generator batch size (0 = same as batch-size). "
+                        "Lower to reduce generator VRAM.")
+    p.add_argument("--grad-checkpoint", action="store_true",
+                   help="Gradient checkpointing (trade compute for memory)")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode")
     p.add_argument("--resume", default=None)
