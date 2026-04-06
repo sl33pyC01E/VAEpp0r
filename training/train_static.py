@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SynthyperVAE training — pretrain VAE on procedural images.
+"""VAEpp training — pretrain VAE on procedural images.
 
 Stage 1: 2D static, 3ch RGB, single frame (T=1).
 No DataLoader — generator produces data directly on GPU.
@@ -25,7 +25,7 @@ import torch.nn.functional as F
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.model import MiniVAE
-from core.generator import SynthyperGenerator
+from core.generator import VAEppGenerator
 
 
 # -- Preview -------------------------------------------------------------------
@@ -118,7 +118,7 @@ def train(args):
           f"{mb:.1f}MB")
 
     # -- Generator --
-    gen = SynthyperGenerator(
+    gen = VAEppGenerator(
         height=args.H, width=args.W, device=str(device),
         bank_size=args.bank_size,
         n_base_layers=args.n_layers,
@@ -314,7 +314,7 @@ def train(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="SynthyperVAE training")
+    p = argparse.ArgumentParser(description="VAEpp training")
     p.add_argument("--H", type=int, default=360)
     p.add_argument("--W", type=int, default=640)
     p.add_argument("--image-ch", type=int, default=3,

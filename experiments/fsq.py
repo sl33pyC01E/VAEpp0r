@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.model import MiniVAE
 from core.fsq import FSQ
-from core.generator import SynthyperGenerator
+from core.generator import VAEppGenerator
 
 
 # -- Preview -------------------------------------------------------------------
@@ -170,7 +170,7 @@ def train(args):
           f"{codebook:,} codes/group", flush=True)
 
     # -- Generator --
-    gen = SynthyperGenerator(
+    gen = VAEppGenerator(
         height=args.H, width=args.W, device=str(device),
         bank_size=500, n_base_layers=64,
     )

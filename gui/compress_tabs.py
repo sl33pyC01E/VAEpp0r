@@ -275,12 +275,12 @@ class FlattenInferenceTab(tk.Frame):
             return
 
         sys.path.insert(0, PROJECT_ROOT)
-        from core.generator import SynthyperGenerator
+        from core.generator import VAEppGenerator
 
         self.status.config(text="Generating...")
         self.update()
 
-        gen = SynthyperGenerator(360, 640, device="cuda", bank_size=200,
+        gen = VAEppGenerator(360, 640, device="cuda", bank_size=200,
                                   n_base_layers=64)
         gen.build_banks()
         images = gen.generate(4)  # (4, 3, H, W)
@@ -686,13 +686,13 @@ class FlattenVideoInferenceTab(tk.Frame):
             return
 
         sys.path.insert(0, PROJECT_ROOT)
-        from core.generator import SynthyperGenerator
+        from core.generator import VAEppGenerator
 
         T = self.T_var.get()
         self.status.config(text=f"Generating T={T} clip...")
         self.update()
 
-        gen = SynthyperGenerator(360, 640, device="cuda", bank_size=200,
+        gen = VAEppGenerator(360, 640, device="cuda", bank_size=200,
                                   n_base_layers=64)
         gen.build_banks()
         clip = gen.generate_sequence(1, T=T)  # (1, T, 3, H, W)
@@ -1040,10 +1040,10 @@ class FSQInferenceTab(tk.Frame):
             self.status.config(text="Load a model first")
             return
         sys.path.insert(0, PROJECT_ROOT)
-        from core.generator import SynthyperGenerator
+        from core.generator import VAEppGenerator
         self.status.config(text="Generating...")
         self.update()
-        gen = SynthyperGenerator(360, 640, device="cuda", bank_size=200,
+        gen = VAEppGenerator(360, 640, device="cuda", bank_size=200,
                                   n_base_layers=64)
         gen.build_banks()
         images = gen.generate(4)

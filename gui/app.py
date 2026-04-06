@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SynthyperVAE GUI — thin assembler.
+"""VAEpp GUI — thin assembler.
 
 Imports tab groups from gui_data, gui_models, gui_compress and
 assembles them into a nested notebook layout:
@@ -25,7 +25,7 @@ from gui.compress_tabs import (
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("SynthyperVAE")
+        self.title("VAEpp")
         self.geometry("1100x750")
         self.configure(bg=BG)
 

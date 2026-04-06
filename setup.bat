@@ -1,5 +1,5 @@
 @echo off
-echo SynthyperVAE Setup
+echo VAEpp Setup
 echo.
 
 if exist venv (

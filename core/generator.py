@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SynthyperVAE procedural image generator.
+"""VAEpp procedural image generator.
 
 Three-tier architecture for fast generation:
   Tier 1: Shape Bank — 1000+ pre-rendered RGBA shape textures
@@ -18,11 +18,11 @@ from core.patterns import PatternBank
 from core import pattern_collage
 
 
-class SynthyperGenerator:
+class VAEppGenerator:
     """GPU-accelerated procedural image generator.
 
     Usage:
-        gen = SynthyperGenerator(360, 640, device="cuda")
+        gen = VAEppGenerator(360, 640, device="cuda")
         gen.build_banks()  # one-time setup
         batch = gen.generate(4)  # (4, 3, 360, 640) on GPU, [0,1]
     """
@@ -2667,7 +2667,7 @@ def main():
     from PIL import Image
     import numpy as np
 
-    gen = SynthyperGenerator(360, 640, device="cuda",
+    gen = VAEppGenerator(360, 640, device="cuda",
                               bank_size=500, n_base_layers=128)
     gen.build_banks()
 
@@ -2694,7 +2694,7 @@ def main():
     # Save samples
     for i in range(min(4, batch.shape[0])):
         img = (batch[i].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-        Image.fromarray(img).save(f"synthyper_sample_{i}.png")
+        Image.fromarray(img).save(f"vaepp_sample_{i}.png")
     print("Saved samples")
 
 

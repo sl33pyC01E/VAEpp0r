@@ -19,7 +19,7 @@ class GeneratorTab(tk.Frame):
         self.gen = None
         self._preview_photos = []
         self._bank_thumbs = []
-        self.bank_dir = os.path.join(SYNTHYPER_ROOT, "bank")
+        self.bank_dir = os.path.join(VAEPP_ROOT, "bank")
         self.build()
 
     def build(self):
@@ -228,8 +228,8 @@ class GeneratorTab(tk.Frame):
         sw, tw, ew = self._get_slider_weights()
         if self.gen is None:
             sys.path.insert(0, PROJECT_ROOT)
-            from core.generator import SynthyperGenerator
-            self.gen = SynthyperGenerator(
+            from core.generator import VAEppGenerator
+            self.gen = VAEppGenerator(
                 360, 640, device="cuda",
                 bank_size=self.bank_size_var.get(),
                 n_base_layers=self.layer_count_var.get(),
@@ -585,14 +585,14 @@ class VideoGenTab(tk.Frame):
     def _get_gen(self):
         if self.gen is None:
             sys.path.insert(0, PROJECT_ROOT)
-            from core.generator import SynthyperGenerator
-            self.gen = SynthyperGenerator(
+            from core.generator import VAEppGenerator
+            self.gen = VAEppGenerator(
                 360, 640, device="cuda",
                 bank_size=self.bank_var.get(),
                 n_base_layers=self.layers_var.get(),
             )
             # Try loading from bank dir
-            bank_dir = os.path.join(SYNTHYPER_ROOT, "bank")
+            bank_dir = os.path.join(VAEPP_ROOT, "bank")
             if os.path.isdir(bank_dir):
                 bank_files = [f for f in os.listdir(bank_dir)
                               if f.startswith("shapes_") and f.endswith(".pt")]
@@ -643,14 +643,14 @@ class VideoGenTab(tk.Frame):
 
     def save_pool(self):
         gen = self._get_gen()
-        pool_path = os.path.join(SYNTHYPER_ROOT, "bank", "motion_pool.json")
+        pool_path = os.path.join(VAEPP_ROOT, "bank", "motion_pool.json")
         os.makedirs(os.path.dirname(pool_path), exist_ok=True)
         gen.save_motion_pool(pool_path)
         self.status.config(text=f"Saved pool to {pool_path}")
 
     def load_pool(self):
         gen = self._get_gen()
-        bank_dir = os.path.join(SYNTHYPER_ROOT, "bank")
+        bank_dir = os.path.join(VAEPP_ROOT, "bank")
         gen.load_motion_pool(bank_dir)
         stats = gen.motion_pool_stats()
         if stats:
@@ -660,7 +660,7 @@ class VideoGenTab(tk.Frame):
 
     def empty_pool(self):
         """Delete all recipe files and clear pool from memory."""
-        bank_dir = os.path.join(SYNTHYPER_ROOT, "bank")
+        bank_dir = os.path.join(VAEPP_ROOT, "bank")
         if os.path.isdir(bank_dir):
             for f in os.listdir(bank_dir):
                 if f.startswith("recipes_") and f.endswith(".json"):
