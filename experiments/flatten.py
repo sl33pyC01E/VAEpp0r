@@ -308,7 +308,12 @@ def train(args):
     amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16,
                  "fp32": torch.float32}[args.precision]
 
-    print(f"Steps: {args.total_steps}, LR: {args.lr}, Batch: {args.batch_size}")
+    gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
+    accum = args.grad_accum
+
+    print(f"Steps: {args.total_steps}, LR: {args.lr}, Batch: {args.batch_size}"
+          f"{f', accum={accum}' if accum > 1 else ''}"
+          f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}")
     print(flush=True)
 
     # Initial preview
@@ -328,37 +333,47 @@ def train(args):
                 stop_file.unlink()
             break
 
-        images = gen.generate(args.batch_size)
-        x = images.unsqueeze(1).to(device)
-
         bottleneck.train()
         opt.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast("cuda", dtype=amp_dtype):
-            # Encode through frozen VAE
-            with torch.no_grad():
-                latent = vae.encode_video(x).squeeze(1)  # (B, C, H, W)
+        for _ai in range(accum):
+            if gen_bs < args.batch_size:
+                chunks = []
+                rem = args.batch_size
+                while rem > 0:
+                    n = min(gen_bs, rem)
+                    chunks.append(gen.generate(n))
+                    rem -= n
+                images = torch.cat(chunks)
+            else:
+                images = gen.generate(args.batch_size)
+            x = images.unsqueeze(1).to(device)
 
-            # Flatten + deflatten
-            lat_recon, flat = bottleneck(latent)
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                # Encode through frozen VAE
+                with torch.no_grad():
+                    latent = vae.encode_video(x).squeeze(1)  # (B, C, H, W)
 
-            # Latent reconstruction loss
-            lat_loss = F.mse_loss(lat_recon, latent)
+                # Flatten + deflatten
+                lat_recon, flat = bottleneck(latent)
 
-            # Decode through frozen VAE for pixel loss
-            with torch.no_grad():
-                gt_recon = vae.decode_video(latent.unsqueeze(1))
-            flat_recon = vae.decode_video(lat_recon.unsqueeze(1))
-            T_r = flat_recon.shape[1]
-            pixel_loss = F.mse_loss(flat_recon[:, -T_r:], gt_recon[:, -T_r:])
+                # Latent reconstruction loss
+                lat_loss = F.mse_loss(lat_recon, latent)
 
-            total = args.w_latent * lat_loss + args.w_pixel * pixel_loss
+                # Decode through frozen VAE for pixel loss
+                with torch.no_grad():
+                    gt_recon = vae.decode_video(latent.unsqueeze(1))
+                flat_recon = vae.decode_video(lat_recon.unsqueeze(1))
+                T_r = flat_recon.shape[1]
+                pixel_loss = F.mse_loss(flat_recon[:, -T_r:], gt_recon[:, -T_r:])
 
-        total.backward()
+                total = args.w_latent * lat_loss + args.w_pixel * pixel_loss
+
+            (total / accum).backward()
+            del latent, lat_recon, flat, gt_recon, flat_recon, images, x
+
         torch.nn.utils.clip_grad_norm_(bottleneck.parameters(), 1.0)
         opt.step()
-
-        del latent, lat_recon, flat, gt_recon, flat_recon, images, x
 
         if step % args.log_every == 0:
             el = time.time() - t0
@@ -437,6 +452,11 @@ def main():
     p.add_argument("--precision", default="bf16")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="Gradient accumulation steps (effective batch = batch-size * grad-accum)")
+    p.add_argument("--gen-batch", type=int, default=0,
+                   help="Generator batch size (0 = same as batch-size). "
+                        "Lower to reduce generator VRAM.")
     p.add_argument("--logdir", default="flatten_logs")
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=2000)

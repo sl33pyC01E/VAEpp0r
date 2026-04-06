@@ -112,10 +112,13 @@ def train(args):
         encoder_time_downscale=(False, False, False),
         decoder_time_upscale=(False, False, False),
     ).to(device)
+    if args.grad_checkpoint:
+        model.use_checkpoint = True
     pc = model.param_count()
     mb = sum(p.numel() * 4 for p in model.parameters()) / 1024 / 1024
     print(f"MiniVAE ({args.image_ch}ch, no temporal): {pc['total']:,} params, "
-          f"{mb:.1f}MB")
+          f"{mb:.1f}MB"
+          f"{', grad-checkpoint' if args.grad_checkpoint else ''}")
 
     # -- Generator --
     gen = VAEppGenerator(
@@ -183,8 +186,13 @@ def train(args):
     scaler = torch.amp.GradScaler("cuda",
                                    enabled=(args.precision == "fp16"))
 
+    gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
+    accum = args.grad_accum
+
     print(f"Steps: {args.total_steps}, LR: {args.lr}, "
-          f"Batch: {args.batch_size}")
+          f"Batch: {args.batch_size}"
+          f"{f', accum={accum}' if accum > 1 else ''}"
+          f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}")
     print(f"Weights: mse={args.w_mse} lpips={args.w_lpips}")
     print(f"Precision: {args.precision}, Device: {device}")
     print(flush=True)
@@ -207,43 +215,55 @@ def train(args):
             print("[Stop detected, saving...]", flush=True)
             break
 
-        # Generate batch on GPU — no DataLoader
-        images = gen.generate(args.batch_size)  # (B, 3, H, W)
-        x = images.unsqueeze(1)  # (B, 1, 3, H, W)
-
         model.train()
         opt.zero_grad(set_to_none=True)
+        losses = {}
 
-        with torch.amp.autocast("cuda", dtype=amp_dtype):
-            recon, latent = model(x)
+        for _ai in range(accum):
+            # Generate batch on GPU — no DataLoader
+            if gen_bs < args.batch_size:
+                chunks = []
+                rem = args.batch_size
+                while rem > 0:
+                    n = min(gen_bs, rem)
+                    chunks.append(gen.generate(n))
+                    rem -= n
+                images = torch.cat(chunks)
+            else:
+                images = gen.generate(args.batch_size)  # (B, 3, H, W)
+            x = images.unsqueeze(1)  # (B, 1, 3, H, W)
 
-            T_out = recon.shape[1]
-            gt = x[:, x.shape[1] - T_out:]
-            rc = recon
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                recon, latent = model(x)
 
-            mse = F.mse_loss(rc, gt)
-            total = args.w_mse * mse
-            losses = {"mse": mse.item()}
+                T_out = recon.shape[1]
+                gt = x[:, x.shape[1] - T_out:]
+                rc = recon
 
-            if lpips_fn is not None:
-                BT = rc.shape[0] * T_out
-                rc_lp = rc.reshape(BT, 3, args.H, args.W) * 2 - 1
-                gt_lp = gt.reshape(BT, 3, args.H, args.W) * 2 - 1
-                lp = lpips_fn(rc_lp, gt_lp).mean()
-                total = total + args.w_lpips * lp
-                losses["lpips"] = lp.item()
+                mse = F.mse_loss(rc, gt)
+                total = args.w_mse * mse
+                losses["mse"] = mse.item()
 
-        if total.dim() > 0:
-            total = total.mean()
+                if lpips_fn is not None:
+                    BT = rc.shape[0] * T_out
+                    rc_lp = rc.reshape(BT, 3, args.H, args.W) * 2 - 1
+                    gt_lp = gt.reshape(BT, 3, args.H, args.W) * 2 - 1
+                    lp = lpips_fn(rc_lp, gt_lp).mean()
+                    total = total + args.w_lpips * lp
+                    losses["lpips"] = lp.item()
 
-        scaler.scale(total).backward()
+            if total.dim() > 0:
+                total = total.mean()
+
+            scaler.scale(total / accum).backward()
+            del recon, latent, rc, gt, images, x
+
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(opt)
         scaler.update()
         sched.step()
 
-        del recon, latent, rc, gt, images, x
         global_step += 1
 
         # -- Log --
@@ -274,7 +294,7 @@ def train(args):
                 "config": {
                     "latent_channels": args.latent_ch,
                     "image_channels": args.image_ch,
-                    "output_channels": 3,
+                    "output_channels": args.image_ch,
                     "encoder_channels": args.enc_ch,
                     "decoder_channels": args.dec_ch,
                     "synthyper": True,
@@ -299,9 +319,9 @@ def train(args):
             "config": {
                 "latent_channels": args.latent_ch,
                 "image_channels": args.image_ch,
-                "output_channels": 3,
-                "encoder_channels": 64,
-                "decoder_channels": "256,128,64",
+                "output_channels": args.image_ch,
+                "encoder_channels": args.enc_ch,
+                "decoder_channels": args.dec_ch,
                 "synthyper": True,
             },
         }
@@ -336,6 +356,13 @@ def main():
     p.add_argument("--bank-size", type=int, default=500)
     p.add_argument("--n-layers", type=int, default=128)
     p.add_argument("--alpha", type=float, default=3.0)
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="Gradient accumulation steps (effective batch = batch-size * grad-accum)")
+    p.add_argument("--gen-batch", type=int, default=0,
+                   help="Generator batch size (0 = same as batch-size). "
+                        "Lower to reduce generator VRAM.")
+    p.add_argument("--grad-checkpoint", action="store_true",
+                   help="Gradient checkpointing (trade compute for memory)")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode (25%% pattern / 25%% collage / "
                         "25%% dense random / 25%% structured)")

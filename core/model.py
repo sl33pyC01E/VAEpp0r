@@ -59,7 +59,8 @@ class TGrow(nn.Module):
         x = self.conv(x)
         return x.reshape(-1, C, H, W)
 
-def apply_model_with_memblocks_parallel(model, x, show_progress_bar):
+def apply_model_with_memblocks_parallel(model, x, show_progress_bar,
+                                        use_checkpoint=False):
     assert x.ndim == 5
     N, T, C, H, W = x.shape
     x = x.reshape(N * T, C, H, W)
@@ -69,7 +70,11 @@ def apply_model_with_memblocks_parallel(model, x, show_progress_bar):
             T = NT // N
             _x = x.reshape(N, T, C, H, W)
             block_memory = F.pad(_x, (0, 0, 0, 0, 0, 0, 1, 0), value=0)[:, :T].reshape(x.shape)
-            x = b(x, block_memory)
+            if use_checkpoint:
+                from torch.utils.checkpoint import checkpoint
+                x = checkpoint(b, x, block_memory, use_reentrant=False)
+            else:
+                x = b(x, block_memory)
         else:
             x = b(x)
     NT, C, H, W = x.shape
@@ -123,9 +128,11 @@ def apply_model_with_memblocks_sequential(model, x, show_progress_bar):
     progress_bar.close()
     return torch.cat(out, 1)
 
-def apply_model_with_memblocks(model, x, parallel, show_progress_bar):
+def apply_model_with_memblocks(model, x, parallel, show_progress_bar,
+                               use_checkpoint=False):
     if parallel:
-        return apply_model_with_memblocks_parallel(model, x, show_progress_bar)
+        return apply_model_with_memblocks_parallel(model, x, show_progress_bar,
+                                                    use_checkpoint)
     else:
         return apply_model_with_memblocks_sequential(model, x, show_progress_bar)
 
@@ -211,6 +218,7 @@ class MiniVAE(nn.Module):
                 self.t_upscale *= m.stride
 
         self.frames_to_trim = self.t_upscale - 1
+        self.use_checkpoint = False
 
         if checkpoint_path is not None:
             self.load_state_dict(torch.load(
@@ -281,7 +289,7 @@ class MiniVAE(nn.Module):
             padding = x[:, -1:].repeat_interleave(n_pad, dim=1)
             x = torch.cat([x, padding], 1)
         return apply_model_with_memblocks(
-            self.encoder, x, parallel, show_progress_bar)
+            self.encoder, x, parallel, show_progress_bar, self.use_checkpoint)
 
     def decode_video(self, x, parallel=True, show_progress_bar=False):
         """Decode latents to multi-modal output.
@@ -296,7 +304,7 @@ class MiniVAE(nn.Module):
         """
         assert x.ndim == 5, f"Expected NTCHW, got {x.ndim}D"
         x = apply_model_with_memblocks(
-            self.decoder, x, parallel, show_progress_bar)
+            self.decoder, x, parallel, show_progress_bar, self.use_checkpoint)
         return x[:, self.frames_to_trim:]
 
     def forward(self, x):

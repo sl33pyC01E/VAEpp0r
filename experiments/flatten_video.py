@@ -236,8 +236,13 @@ def train(args):
     amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16,
                  "fp32": torch.float32}[args.precision]
 
+    gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
+    accum = args.grad_accum
+
     print(f"Steps: {args.total_steps}, LR: {args.lr}, Batch: {args.batch_size}, "
-          f"T: {args.T}")
+          f"T: {args.T}"
+          f"{f', accum={accum}' if accum > 1 else ''}"
+          f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}")
     print(flush=True)
 
     # Initial preview
@@ -259,55 +264,65 @@ def train(args):
                 stop_file.unlink()
             break
 
-        clips = gen.generate_from_pool(args.batch_size)  # (B, T, 3, H, W)
-        x = clips.to(device)
-
         bottleneck.train()
         opt.zero_grad(set_to_none=True)
 
-        with torch.amp.autocast("cuda", dtype=amp_dtype):
-            # Encode through frozen temporal VAE
-            with torch.no_grad():
-                latent = vae.encode_video(x)  # (B, T', C, H, W)
+        for _ai in range(accum):
+            if gen_bs < args.batch_size:
+                chunks = []
+                rem = args.batch_size
+                while rem > 0:
+                    n = min(gen_bs, rem)
+                    chunks.append(gen.generate_from_pool(n))
+                    rem -= n
+                clips = torch.cat(chunks)
+            else:
+                clips = gen.generate_from_pool(args.batch_size)  # (B, T, 3, H, W)
+            x = clips.to(device)
 
-            B, Tp, C, Hl, Wl = latent.shape
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                # Encode through frozen temporal VAE
+                with torch.no_grad():
+                    latent = vae.encode_video(x)  # (B, T', C, H, W)
 
-            # Flatten + deflatten per-frame
-            lat_flat = latent.reshape(B * Tp, C, Hl, Wl)
-            lat_recon_flat, flat = bottleneck(lat_flat)
-            lat_recon = lat_recon_flat.reshape(B, Tp, C, Hl, Wl)
+                B, Tp, C, Hl, Wl = latent.shape
 
-            # Latent reconstruction loss (per-frame)
-            lat_loss = F.mse_loss(lat_recon, latent)
+                # Flatten + deflatten per-frame
+                lat_flat = latent.reshape(B * Tp, C, Hl, Wl)
+                lat_recon_flat, flat = bottleneck(lat_flat)
+                lat_recon = lat_recon_flat.reshape(B, Tp, C, Hl, Wl)
 
-            # Decode through frozen VAE for pixel loss
-            with torch.no_grad():
-                gt_recon = vae.decode_video(latent)
-            flat_recon = vae.decode_video(lat_recon)
+                # Latent reconstruction loss (per-frame)
+                lat_loss = F.mse_loss(lat_recon, latent)
 
-            T_gt = gt_recon.shape[1]
-            T_fl = flat_recon.shape[1]
-            T_match = min(T_gt, T_fl)
-            pixel_loss = F.mse_loss(
-                flat_recon[:, T_fl - T_match:],
-                gt_recon[:, T_gt - T_match:])
+                # Decode through frozen VAE for pixel loss
+                with torch.no_grad():
+                    gt_recon = vae.decode_video(latent)
+                flat_recon = vae.decode_video(lat_recon)
 
-            # Temporal consistency in latent space
-            temp_loss = torch.tensor(0.0, device=device)
-            if Tp >= 2:
-                gt_diff = latent[:, 1:] - latent[:, :-1]
-                rc_diff = lat_recon[:, 1:] - lat_recon[:, :-1]
-                temp_loss = F.l1_loss(rc_diff, gt_diff)
+                T_gt = gt_recon.shape[1]
+                T_fl = flat_recon.shape[1]
+                T_match = min(T_gt, T_fl)
+                pixel_loss = F.mse_loss(
+                    flat_recon[:, T_fl - T_match:],
+                    gt_recon[:, T_gt - T_match:])
 
-            total = (args.w_latent * lat_loss
-                     + args.w_pixel * pixel_loss
-                     + args.w_temporal * temp_loss)
+                # Temporal consistency in latent space
+                temp_loss = torch.tensor(0.0, device=device)
+                if Tp >= 2:
+                    gt_diff = latent[:, 1:] - latent[:, :-1]
+                    rc_diff = lat_recon[:, 1:] - lat_recon[:, :-1]
+                    temp_loss = F.l1_loss(rc_diff, gt_diff)
 
-        total.backward()
+                total = (args.w_latent * lat_loss
+                         + args.w_pixel * pixel_loss
+                         + args.w_temporal * temp_loss)
+
+            (total / accum).backward()
+            del latent, lat_recon, flat, gt_recon, flat_recon, clips, x
+
         torch.nn.utils.clip_grad_norm_(bottleneck.parameters(), 1.0)
         opt.step()
-
-        del latent, lat_recon, flat, gt_recon, flat_recon, clips, x
 
         if step % args.log_every == 0:
             el = time.time() - t0
@@ -398,6 +413,11 @@ def main():
                    choices=["fp16", "bf16", "fp32"])
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
+    p.add_argument("--grad-accum", type=int, default=1,
+                   help="Gradient accumulation steps (effective batch = batch-size * grad-accum)")
+    p.add_argument("--gen-batch", type=int, default=0,
+                   help="Generator batch size (0 = same as batch-size). "
+                        "Lower to reduce generator VRAM.")
     p.add_argument("--logdir", default="flatten_video_logs")
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=2000)
