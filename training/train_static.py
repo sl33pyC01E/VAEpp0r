@@ -256,7 +256,7 @@ def train(args):
                 losses["mse"] = mse.item()
 
                 if lpips_fn is not None:
-                    BT = rc.shape[0] * T_out
+                    BT = rc.shape[0] * T_match
                     rc_lp = rc[:, :, :3].reshape(BT, 3, args.H, args.W) * 2 - 1
                     gt_lp = gt[:, :, :3].reshape(BT, 3, args.H, args.W) * 2 - 1
                     lp = lpips_fn(rc_lp, gt_lp).mean()

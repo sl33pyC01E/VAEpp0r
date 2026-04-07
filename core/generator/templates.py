@@ -212,12 +212,14 @@ class TemplateMixin:
         for bi in range(B):
             if torch.rand(1).item() < 0.5:
                 # Vertical mirror
+                rw = W - W // 2  # right half width (handles odd W)
                 canvas[bi, :, :, :W//2] = half[bi, :, :, :W//2]
-                canvas[bi, :, :, W//2:] = half[bi, :, :, :W//2].flip(-1)[:, :, :W-W//2]
+                canvas[bi, :, :, W//2:] = half[bi, :, :, :rw].flip(-1)
             else:
                 # Horizontal mirror
+                bh = H - H // 2  # bottom half height (handles odd H)
                 canvas[bi, :, :H//2] = half[bi, :, :H//2]
-                canvas[bi, :, H//2:] = half[bi, :, :H//2].flip(-2)[:, :H-H//2]
+                canvas[bi, :, H//2:] = half[bi, :, :bh].flip(-2)
         return canvas
 
     def _tmpl_border(self, canvas, B):

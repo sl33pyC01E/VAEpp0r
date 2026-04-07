@@ -25,7 +25,6 @@ class MotionMixin:
         Returns: (B, M, T, 4) tensor — [x, y, scale, rotation] per stamp per frame.
         """
         H, W = self.H, self.W
-        dt = 1.0 / 30.0  # simulate at 30fps
 
         # Initial positions
         x = torch.rand(B, M, device=self.device) * W
@@ -198,7 +197,7 @@ class MotionMixin:
         Returns: (B, T, 3, H, W) tensor in [0, 1] on self.device.
         """
         if self.base_layers is None:
-            self.build_banks()
+            self.build_base_layers()
         self._maybe_refresh_dynamic()
 
         B = batch_size
@@ -606,7 +605,7 @@ class MotionMixin:
         Channels: RGB(3) + depth(1) + flow(2) + semantic(3)
         """
         if self.base_layers is None:
-            self.build_banks()
+            self.build_base_layers()
         self._maybe_refresh_dynamic()
 
         B = batch_size

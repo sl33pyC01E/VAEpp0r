@@ -264,12 +264,14 @@ def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
 
     trim = getattr(vae, 'frames_to_trim', 0)
     output_per_chunk = chunk_size - trim
+    target_len = T - trim  # total recon frames we want
     all_vae = []
     all_flat = []
     all_lat = []
 
     chunk_start = 0
-    while chunk_start < T:
+    collected = 0
+    while chunk_start < T and collected < target_len:
         chunk_end = min(chunk_start + chunk_size, T)
         chunk = x[:, chunk_start:chunk_end]
 
@@ -285,13 +287,17 @@ def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
             lat_r = lat_r.reshape(B, Tp, C, Hl, Wl)
             rc_flat = vae.decode_video(lat_r)
 
-        all_vae.append(rc_vae.float().cpu())
-        all_flat.append(rc_flat.float().cpu())
+        need = target_len - collected
+        keep_vae = min(rc_vae.shape[1], need)
+        keep_flat = min(rc_flat.shape[1], need)
+        all_vae.append(rc_vae[:, :keep_vae].float().cpu())
+        all_flat.append(rc_flat[:, :keep_flat].float().cpu())
         all_lat.append(lat.float().cpu())
+        collected += keep_vae
         del rc_vae, rc_flat, lat, lat_r, lat_f
         torch.cuda.empty_cache()
 
-        if chunk_end >= T:
+        if chunk_end >= T or collected >= target_len:
             break
         chunk_start += output_per_chunk
 
