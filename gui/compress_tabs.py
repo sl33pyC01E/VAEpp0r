@@ -4,6 +4,7 @@
 import os
 import subprocess
 import sys
+import threading
 import tkinter as tk
 from pathlib import Path
 
@@ -1107,7 +1108,7 @@ class FSQInferenceTab(tk.Frame):
     def _run_inference_bg(self, images):
         """Run inference on background thread, marshal results to main thread."""
         import torch
-        x = images.unsqueeze(1).cuda() if images.dim() == 4 else images.unsqueeze(1).cuda()
+        x = images.unsqueeze(1).cuda() if images.dim() == 4 else images.unsqueeze(0).unsqueeze(1).cuda()
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
             recon_cont, _ = self.vae(x)
             lat = self.vae.encode_video(x).squeeze(1)

@@ -379,9 +379,16 @@ class MotionMixin:
                         grid_layer[bi, :, y0:y0+eh, x0:x0+ew] = cell[:, :eh, :ew]
             grid_opacity = torch.rand(B, 1, 1, 1, device=self.device) * 0.5 + 0.3
 
-        # --- Fractal layout (30% chance) ---
+        # --- Fractal layout (30% chance, pre-rendered for temporal coherence) ---
         use_fractal = torch.rand(1).item() < 0.3 and self.shape_bank is not None
         n_frac = torch.randint(8, 20, (1,)).item() if use_fractal else 0
+        fractal_overlay = None
+        if use_fractal:
+            # Pre-render fractal layout onto a black canvas once,
+            # then blend it each frame to avoid per-frame re-randomization
+            frac_canvas = torch.zeros(B, 3, H, W, device=self.device)
+            frac_canvas = self._render_fractal_layout(frac_canvas, n_shapes=n_frac)
+            fractal_overlay = frac_canvas  # (B, 3, H, W), black where no shapes
 
         # --- Post-processing params (consistent across frames) ---
         pp_gamma = torch.rand(B, 1, 1, 1, device=self.device) * 0.7 + 0.7
@@ -568,9 +575,12 @@ class MotionMixin:
             if use_viewport:
                 canvas = self._apply_viewport(canvas, ti, T, vp_pan, vp_zoom, vp_rot)
 
-            # Fractal layout
-            if use_fractal:
-                canvas = self._render_fractal_layout(canvas, n_shapes=n_frac)
+            # Fractal layout (pre-rendered overlay for temporal coherence)
+            if fractal_overlay is not None:
+                # Additive blend: fractal shapes rendered on black, so
+                # non-zero pixels are the shapes to composite
+                frac_mask = (fractal_overlay.sum(dim=1, keepdim=True) > 0.01).float()
+                canvas = canvas * (1 - frac_mask) + fractal_overlay * frac_mask
 
             # Fluid advection
             if flow_fields is not None:
