@@ -11,6 +11,7 @@ Stage 1: 2D static (single frames, RGB only).
 
 import math
 import os
+import time as _time
 import torch
 import torch.nn.functional as F
 
@@ -203,9 +204,10 @@ class VAEppGenerator(
 
         # Sample shape type
         shape_type = torch.multinomial(self.shape_probs, 1).item()
-        # Sample size
+        # Sample size (Pareto distribution via inverse CDF)
         u = torch.rand(1, device=self.device).item()
-        r_frac = self.min_r_frac * (self.max_r_frac / max(self.min_r_frac, 0.01)) ** u
+        r_frac = self.min_r_frac / max(u ** (1.0 / self.alpha), 1e-6)
+        r_frac = min(r_frac, self.max_r_frac)
         angle = torch.rand(1, device=self.device).item() * 2 * math.pi
 
         # Compute SDF
@@ -321,7 +323,6 @@ class VAEppGenerator(
               flush=True)
 
         layers = []
-        import time as _time
         t0 = _time.time()
         for li in range(N):
             # Random background
@@ -455,12 +456,15 @@ class VAEppGenerator(
                     canvas[bi, :, cy_s:cy_s+rh, cx:cx+rw] * (1 - a) + \
                     rgb_r[:, sy:ey, sx:ex] * a
 
-        # Micro-stamps
-        if torch.rand(1).item() < 0.5:
+        # Micro-stamps (per-image decision)
+        use_micro = torch.rand(B) < 0.5
+        if use_micro.any():
             n_micro = torch.randint(n_micro_range[0], n_micro_range[1] + 1,
                                      (1,)).item()
             for _ in range(n_micro):
                 for bi in range(B):
+                    if not use_micro[bi]:
+                        continue
                     sidx = torch.randint(0, self.shape_bank.shape[0], (1,)).item()
                     rgba = self._transform_bank_shape(self.shape_bank[sidx].clone())
                     rgb = rgba[:3]
@@ -776,10 +780,10 @@ class VAEppGenerator(
         canvas = canvas.clamp(1e-6, 1).pow(gamma)
 
         # Per-image HSV hue jitter
-        if torch.rand(1).item() < 0.4:
-            shift = torch.randint(0, 3, (1,)).item()
-            if shift > 0:
-                canvas = canvas.roll(shift, dims=1)  # roll RGB channels
+        for bi in range(B):
+            if torch.rand(1).item() < 0.4:
+                shift = torch.randint(1, 3, (1,)).item()
+                canvas[bi] = canvas[bi].roll(shift, dims=0)
 
         # Random local contrast (per-image brightness wave)
         if torch.rand(1).item() < 0.25:

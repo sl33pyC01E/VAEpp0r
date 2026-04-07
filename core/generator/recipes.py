@@ -4,6 +4,7 @@
 Lightweight motion parameter storage and rendering for fast temporal sampling.
 """
 
+import math
 import os
 import torch
 
@@ -22,6 +23,9 @@ class RecipesMixin:
             self.layers_per_image[0], self.layers_per_image[1] + 1, (1,)).item()
         n_stamps = torch.randint(
             self.stamps_per_image[0], self.stamps_per_image[1] + 1, (1,)).item()
+
+        n_micro = torch.randint(20, 60, (1,)).item() if torch.rand(1).item() < 0.5 else 0
+        n_micro_alloc = max(n_micro, 1)
 
         recipe = {
             "T": T,
@@ -58,12 +62,12 @@ class RecipesMixin:
             "fine_opacity": torch.rand(1).item() * 0.4 + 0.15,
             "use_fine": torch.rand(1).item() < 0.5,
             # Micro stamps
-            "n_micro": torch.randint(20, 60, (1,)).item() if torch.rand(1).item() < 0.5 else 0,
-            "micro_idx": torch.randint(0, max(self.bank_size, 1), (60,)).tolist(),
-            "micro_x": (torch.rand(60) * W).tolist(),
-            "micro_y": (torch.rand(60) * H).tolist(),
-            "micro_dx": ((torch.rand(60) - 0.5) * W * 0.15).tolist(),
-            "micro_dy": ((torch.rand(60) - 0.5) * H * 0.15).tolist(),
+            "n_micro": n_micro,
+            "micro_idx": torch.randint(0, max(self.bank_size, 1), (n_micro_alloc,)).tolist(),
+            "micro_x": (torch.rand(n_micro_alloc) * W).tolist(),
+            "micro_y": (torch.rand(n_micro_alloc) * H).tolist(),
+            "micro_dx": ((torch.rand(n_micro_alloc) - 0.5) * W * 0.15).tolist(),
+            "micro_dy": ((torch.rand(n_micro_alloc) - 0.5) * H * 0.15).tolist(),
             # Settings
             "gamma": torch.rand(1).item() * 0.7 + 0.7,
             "seq_kwargs": seq_kwargs,
@@ -201,11 +205,11 @@ class RecipesMixin:
             sy = sy + svy
             s_rot = s_rot + stamp_rot_speed
 
-            # Bounce
+            # Bounce (with energy loss matching _simulate_physics)
             bounce_x = (sx < 0) | (sx > W)
             bounce_y = (sy < 0) | (sy > H)
-            svx[bounce_x] = -svx[bounce_x]
-            svy[bounce_y] = -svy[bounce_y]
+            svx[bounce_x] = -svx[bounce_x] * 0.8
+            svy[bounce_y] = -svy[bounce_y] * 0.7
             sx.clamp_(0, W)
             sy.clamp_(0, H)
 
@@ -251,7 +255,6 @@ class RecipesMixin:
                 rot_angle = stamp_trajectories[si, ti, 3].item()
 
                 if abs(rot_angle) > 0.01:
-                    import math
                     cos_r = math.cos(rot_angle)
                     sin_r = math.sin(rot_angle)
                     rot_theta = torch.tensor(
@@ -408,7 +411,13 @@ class RecipesMixin:
             with open(path) as f:
                 recipes = json.load(f)
             self._recipe_pool.extend(recipes)
-        self._motion_pool_T = self._recipe_pool[0]["T"] if self._recipe_pool else 8
+        if self._recipe_pool:
+            t_values = set(r["T"] for r in self._recipe_pool)
+            self._motion_pool_T = max(t_values)
+            if len(t_values) > 1:
+                print(f"  WARNING: mixed T values in pool: {t_values}, using T={self._motion_pool_T}", flush=True)
+        else:
+            self._motion_pool_T = 8
         self._motion_pool_call_count = 0
         print(f"Total recipes: {len(self._recipe_pool)}", flush=True)
 

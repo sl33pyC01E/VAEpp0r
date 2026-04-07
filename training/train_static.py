@@ -163,6 +163,7 @@ def train(args):
 
     # -- Resume --
     global_step = 0
+    ckpt = None
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         if "model" in ckpt:
@@ -183,7 +184,7 @@ def train(args):
     scaler = torch.amp.GradScaler("cuda",
                                    enabled=(args.precision == "fp16"))
 
-    if global_step > 0 and not args.fresh_opt:
+    if global_step > 0 and not args.fresh_opt and ckpt is not None:
         if ckpt.get("scheduler"):
             sched.load_state_dict(ckpt["scheduler"])
         else:

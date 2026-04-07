@@ -235,6 +235,8 @@ def train(args):
 
     amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16,
                  "fp32": torch.float32}[args.precision]
+    scaler = torch.amp.GradScaler("cuda",
+                                   enabled=(args.precision == "fp16"))
 
     gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
     accum = args.grad_accum
@@ -318,11 +320,13 @@ def train(args):
                          + args.w_pixel * pixel_loss
                          + args.w_temporal * temp_loss)
 
-            (total / accum).backward()
+            scaler.scale(total / accum).backward()
             del latent, lat_recon, flat, gt_recon, flat_recon, clips, x
 
+        scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(bottleneck.parameters(), 1.0)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
 
         if step % args.log_every == 0:
             el = time.time() - t0

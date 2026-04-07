@@ -225,8 +225,11 @@ class MiniVAE(nn.Module):
         self.use_checkpoint = False
 
         if checkpoint_path is not None:
-            self.load_state_dict(torch.load(
-                checkpoint_path, map_location="cpu", weights_only=True))
+            ckpt_data = torch.load(
+                checkpoint_path, map_location="cpu", weights_only=True)
+            if isinstance(ckpt_data, dict) and "model" in ckpt_data:
+                ckpt_data = ckpt_data["model"]
+            self.load_state_dict(ckpt_data)
 
     @classmethod
     def from_pretrained_taehv(cls, taehv_path="taehv/taehv.pth", **kwargs):

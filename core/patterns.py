@@ -10,6 +10,7 @@ Used by VAEppGenerator's disco mode for the "pure pattern" and
 """
 
 import math
+import random as _random
 import torch
 import torch.nn.functional as F
 
@@ -700,7 +701,6 @@ class PatternBank:
             rows = self.H // cs
             cols = self.W // cs
             # Run DFS on CPU to avoid per-element GPU syncs
-            import random as _random
             maze_h, maze_w = rows * 2 + 1, cols * 2 + 1
             maze_cpu = [[1] * maze_w for _ in range(maze_h)]
             visited_cpu = [[False] * cols for _ in range(rows)]

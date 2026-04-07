@@ -117,12 +117,26 @@ def train(args):
     logdir.mkdir(parents=True, exist_ok=True)
 
     # -- Model (3ch RGB, temporal ENABLED) --
+    # Read encoder/decoder config from checkpoint if resuming
+    enc_ch = 64
+    dec_ch = (256, 128, 64)
+    if args.resume:
+        _ckpt_peek = torch.load(args.resume, map_location="cpu", weights_only=False)
+        _cfg = _ckpt_peek.get("config", {})
+        enc_ch = _cfg.get("encoder_channels", 64)
+        dec_ch_str = _cfg.get("decoder_channels", "256,128,64")
+        if isinstance(dec_ch_str, str):
+            dec_ch = tuple(int(x) for x in dec_ch_str.split(","))
+        elif isinstance(dec_ch_str, (list, tuple)):
+            dec_ch = tuple(dec_ch_str)
+        del _ckpt_peek
+
     model = MiniVAE(
         latent_channels=args.latent_ch,
         image_channels=3,
         output_channels=3,
-        encoder_channels=64,
-        decoder_channels=(256, 128, 64),
+        encoder_channels=enc_ch,
+        decoder_channels=dec_ch,
         encoder_time_downscale=(True, True, False),
         decoder_time_upscale=(False, True, True),
     ).to(device)
@@ -183,6 +197,7 @@ def train(args):
 
     # -- Resume --
     global_step = 0
+    ckpt = None
     if args.resume:
         ckpt = torch.load(args.resume, map_location="cpu", weights_only=False)
         if "model" in ckpt:
@@ -222,7 +237,7 @@ def train(args):
     scaler = torch.amp.GradScaler("cuda",
                                    enabled=(args.precision == "fp16"))
 
-    if global_step > 0 and not args.fresh_opt:
+    if global_step > 0 and not args.fresh_opt and ckpt is not None:
         if ckpt.get("scheduler"):
             sched.load_state_dict(ckpt["scheduler"])
         else:

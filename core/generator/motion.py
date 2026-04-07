@@ -255,8 +255,12 @@ class MotionMixin:
         # --- Stamp setup with physics ---
         max_stamps = n_stamps.max().item()
 
-        stamp_idx = torch.randint(0, self.shape_bank.shape[0],
-                                   (B, max_stamps), device=self.device)
+        if self.shape_bank is None:
+            max_stamps = 0
+            n_stamps = torch.zeros(B, device=self.device, dtype=torch.long)
+
+        stamp_idx = torch.randint(0, max(1, self.shape_bank.shape[0] if self.shape_bank is not None else 1),
+                                   (B, max(max_stamps, 1)), device=self.device)
 
         if use_physics:
             trajectories = self._simulate_physics(B, max_stamps, T)
