@@ -379,7 +379,8 @@ class RecipesMixin:
             return
         import json, time as _time
         d = os.path.dirname(path)
-        os.makedirs(d, exist_ok=True)
+        if d:
+            os.makedirs(d, exist_ok=True)
         # Save to the requested path
         with open(path, 'w') as f:
             json.dump(self._recipe_pool, f)
