@@ -9,8 +9,6 @@ Latent: (N, T', C_lat, H/8, W/8)  — 8x spatial, up to 4x temporal
 Output: (N, T'', C_out, H, W)
 """
 
-import sys
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

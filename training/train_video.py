@@ -260,6 +260,25 @@ def train(args):
     print(f"Precision: {args.precision}, Device: {device}")
     print(flush=True)
 
+    def _make_checkpoint():
+        return {
+            "model": model.state_dict(),
+            "optimizer": opt.state_dict(),
+            "scheduler": sched.state_dict(),
+            "scaler": scaler.state_dict(),
+            "global_step": global_step,
+            "config": {
+                "latent_channels": args.latent_ch,
+                "image_channels": 3,
+                "output_channels": 3,
+                "encoder_channels": enc_ch,
+                "decoder_channels": ",".join(str(x) for x in dec_ch),
+                "temporal": True,
+                "T": args.T,
+                "synthyper_stage": 2,
+            },
+        }
+
     # -- Initial preview --
     save_preview(model, gen, str(logdir), global_step, device, amp_dtype, args.T)
 
@@ -366,23 +385,7 @@ def train(args):
 
         # -- Checkpoint --
         if global_step % args.save_every == 0:
-            d = {
-                "model": model.state_dict(),
-                "optimizer": opt.state_dict(),
-                "scheduler": sched.state_dict(),
-                "scaler": scaler.state_dict(),
-                "global_step": global_step,
-                "config": {
-                    "latent_channels": args.latent_ch,
-                    "image_channels": 3,
-                    "output_channels": 3,
-                    "encoder_channels": enc_ch,
-                    "decoder_channels": ",".join(str(x) for x in dec_ch),
-                    "temporal": True,
-                    "T": args.T,
-                    "synthyper_stage": 2,
-                },
-            }
+            d = _make_checkpoint()
             p = logdir / f"step_{global_step:06d}.pt"
             torch.save(d, p)
             torch.save(d, logdir / "latest.pt")
@@ -395,23 +398,7 @@ def train(args):
 
     # Save on exit
     if global_step > start_step:
-        d = {
-            "model": model.state_dict(),
-            "optimizer": opt.state_dict(),
-            "scheduler": sched.state_dict(),
-            "scaler": scaler.state_dict(),
-            "global_step": global_step,
-            "config": {
-                "latent_channels": args.latent_ch,
-                "image_channels": 3,
-                "output_channels": 3,
-                "encoder_channels": enc_ch,
-                "decoder_channels": ",".join(str(x) for x in dec_ch),
-                "temporal": True,
-                "T": args.T,
-                "synthyper_stage": 2,
-            },
-        }
+        d = _make_checkpoint()
         torch.save(d, logdir / f"step_{global_step:06d}.pt")
         torch.save(d, logdir / "latest.pt")
         print(f"  saved step {global_step}", flush=True)

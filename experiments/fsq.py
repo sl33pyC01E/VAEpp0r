@@ -224,17 +224,20 @@ def train(args):
                     opt, T_max=args.total_steps,
                     eta_min=float(args.lr) * 0.01,
                     last_epoch=start_step)
-            if rk.get("scaler") and args.precision == "fp16":
-                try:
-                    scaler.load_state_dict(rk["scaler"])
-                except Exception:
-                    pass
             print(f"  Resumed from {args.resume} at step {start_step}", flush=True)
 
+    # -- Precision --
     amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16,
                  "fp32": torch.float32}[args.precision]
     scaler = torch.amp.GradScaler("cuda",
                                    enabled=(args.precision == "fp16"))
+
+    if start_step > 0 and not args.fresh_opt and 'rk' in locals():
+        if rk.get("scaler") and args.precision == "fp16":
+            try:
+                scaler.load_state_dict(rk["scaler"])
+            except Exception:
+                pass
 
     gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
     accum = args.grad_accum
@@ -246,6 +249,27 @@ def train(args):
           flush=True)
     print(f"Weights: w_mse={args.w_mse}, w_commit={args.w_commit}", flush=True)
     print(flush=True)
+
+    def _make_checkpoint():
+        return {
+            "model": vae.state_dict(),
+            "optimizer": opt.state_dict(),
+            "scheduler": sched.state_dict(),
+            "scaler": scaler.state_dict(),
+            "global_step": step,
+            "config": {
+                "image_channels": ch,
+                "latent_channels": lat_ch,
+                "encoder_channels": enc_ch,
+                "decoder_channels": ",".join(str(x) for x in dec_ch),
+                "temporal": temporal,
+                "fsq": {
+                    "levels": args.levels,
+                    "n_groups": n_groups,
+                    "channels_per_group": cpg,
+                },
+            },
+        }
 
     # Initial preview
     save_preview(vae, fsq_layer, gen, str(logdir), start_step, device, amp_dtype)
@@ -322,25 +346,7 @@ def train(args):
                          device, amp_dtype)
 
         if step % args.save_every == 0:
-            d = {
-                "model": vae.state_dict(),
-                "optimizer": opt.state_dict(),
-                "scheduler": sched.state_dict(),
-                "scaler": scaler.state_dict(),
-                "global_step": step,
-                "config": {
-                    "image_channels": ch,
-                    "latent_channels": lat_ch,
-                    "encoder_channels": enc_ch,
-                    "decoder_channels": ",".join(str(x) for x in dec_ch),
-                    "temporal": temporal,
-                    "fsq": {
-                        "levels": args.levels,
-                        "n_groups": n_groups,
-                        "channels_per_group": cpg,
-                    },
-                },
-            }
+            d = _make_checkpoint()
             torch.save(d, logdir / f"step_{step:06d}.pt")
             torch.save(d, logdir / "latest.pt")
             print(f"  saved step {step}", flush=True)
@@ -352,25 +358,7 @@ def train(args):
 
     # Save on exit
     if step > start_step:
-        d = {
-            "model": vae.state_dict(),
-            "optimizer": opt.state_dict(),
-            "scheduler": sched.state_dict(),
-            "scaler": scaler.state_dict(),
-            "global_step": step,
-            "config": {
-                "image_channels": ch,
-                "latent_channels": lat_ch,
-                "encoder_channels": enc_ch,
-                "decoder_channels": ",".join(str(x) for x in dec_ch),
-                "temporal": temporal,
-                "fsq": {
-                    "levels": args.levels,
-                    "n_groups": n_groups,
-                    "channels_per_group": cpg,
-                },
-            },
-        }
+        d = _make_checkpoint()
         torch.save(d, logdir / f"step_{step:06d}.pt")
         torch.save(d, logdir / "latest.pt")
         print(f"  saved step {step}", flush=True)

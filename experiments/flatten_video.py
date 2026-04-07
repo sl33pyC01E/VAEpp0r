@@ -256,6 +256,23 @@ def train(args):
           f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}")
     print(flush=True)
 
+    def _make_checkpoint():
+        return {
+            "bottleneck": bottleneck.state_dict(),
+            "optimizer": opt.state_dict(),
+            "step": step,
+            "config": {
+                "latent_channels": lat_C,
+                "bottleneck_channels": args.bottleneck_ch,
+                "spatial_h": lat_H,
+                "spatial_w": lat_W,
+                "walk_order": args.walk_order,
+                "vae_ckpt": args.vae_ckpt,
+                "temporal": True,
+                "T": args.T,
+            },
+        }
+
     # Initial preview
     save_preview(vae, bottleneck, gen, str(logdir), start_step, device,
                  amp_dtype, args.T)
@@ -355,21 +372,7 @@ def train(args):
                          device, amp_dtype, args.T)
 
         if step % args.save_every == 0:
-            d = {
-                "bottleneck": bottleneck.state_dict(),
-                "optimizer": opt.state_dict(),
-                "step": step,
-                "config": {
-                    "latent_channels": lat_C,
-                    "bottleneck_channels": args.bottleneck_ch,
-                    "spatial_h": lat_H,
-                    "spatial_w": lat_W,
-                    "walk_order": args.walk_order,
-                    "vae_ckpt": args.vae_ckpt,
-                    "temporal": True,
-                    "T": args.T,
-                },
-            }
+            d = _make_checkpoint()
             torch.save(d, logdir / f"step_{step:06d}.pt")
             torch.save(d, logdir / "latest.pt")
             print(f"  saved step {step}", flush=True)
@@ -382,21 +385,7 @@ def train(args):
 
     # Save on exit
     if step > start_step:
-        d = {
-            "bottleneck": bottleneck.state_dict(),
-            "optimizer": opt.state_dict(),
-            "step": step,
-            "config": {
-                "latent_channels": lat_C,
-                "bottleneck_channels": args.bottleneck_ch,
-                "spatial_h": lat_H,
-                "spatial_w": lat_W,
-                "walk_order": args.walk_order,
-                "vae_ckpt": args.vae_ckpt,
-                "temporal": True,
-                "T": args.T,
-            },
-        }
+        d = _make_checkpoint()
         torch.save(d, logdir / f"step_{step:06d}.pt")
         torch.save(d, logdir / "latest.pt")
         print(f"  saved step {step}", flush=True)
