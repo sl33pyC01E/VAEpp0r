@@ -48,7 +48,7 @@ class RecipesMixin:
             "stamp_vy": ((torch.rand(n_stamps) - 0.5) * 5).tolist(),
             "stamp_gravity": (torch.rand(n_stamps) * 3 + 1).tolist(),
             "stamp_scale": (torch.rand(n_stamps) * 1.0 + 0.3).tolist(),
-            "stamp_rot": (torch.rand(n_stamps) * 6.28).tolist(),
+            "stamp_rot": (torch.rand(n_stamps) * 2 * math.pi).tolist(),
             "stamp_rot_speed": ((torch.rand(n_stamps) - 0.5) * 0.3).tolist(),
             # Viewport
             "vp_pan": ((torch.rand(2) - 0.5) * torch.tensor([W, H]).float() *

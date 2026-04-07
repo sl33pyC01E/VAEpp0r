@@ -43,7 +43,7 @@ class MotionMixin:
         scale_amp = torch.rand(B, M, device=self.device) * 0.3  # oscillation amplitude
 
         # Rotation
-        rot = torch.rand(B, M, device=self.device) * 6.28
+        rot = torch.rand(B, M, device=self.device) * 2 * math.pi
         rot_speed = (torch.rand(B, M, device=self.device) - 0.5) * 0.3  # rad/frame
 
         trajectories = torch.zeros(B, M, T, 4, device=self.device)
@@ -90,7 +90,7 @@ class MotionMixin:
         base_vx = torch.randn(B, 1, ch, cw, device=self.device)
         base_vy = torch.randn(B, 1, ch, cw, device=self.device)
         # Random phase for temporal variation
-        phase = torch.rand(B, 1, 1, 1, device=self.device) * 6.28
+        phase = torch.rand(B, 1, 1, 1, device=self.device) * 2 * math.pi
 
         # Smoothing kernel
         k = 3
@@ -100,7 +100,7 @@ class MotionMixin:
         for ti in range(T):
             t_val = ti / max(T - 1, 1)
             # Blend base noise with per-frame noise for smooth temporal variation
-            t_phase = phase + t_val * 6.28
+            t_phase = phase + t_val * 2 * math.pi
             blend = 0.7  # weight of persistent base field
             vx_noise = base_vx * blend + torch.randn(B, 1, ch, cw, device=self.device) * (1 - blend)
             vy_noise = base_vy * blend + torch.randn(B, 1, ch, cw, device=self.device) * (1 - blend)
@@ -396,9 +396,9 @@ class MotionMixin:
         pp_wave = None
         if torch.rand(1).item() < 0.25:
             pp_wave_freq = torch.rand(1, device=self.device).item() * 4 + 1
-            pp_wave_phase = torch.rand(1, device=self.device).item() * 6.28
+            pp_wave_phase = torch.rand(1, device=self.device).item() * 2 * math.pi
             x_lin = torch.linspace(0, 1, W, device=self.device)
-            pp_wave = (torch.sin(x_lin * pp_wave_freq * 6.28 + pp_wave_phase) * 0.1
+            pp_wave = (torch.sin(x_lin * pp_wave_freq * 2 * math.pi + pp_wave_phase) * 0.1
                        ).view(1, 1, 1, W)
         pp_vignette = None
         if torch.rand(1).item() < 0.15:

@@ -788,10 +788,10 @@ class VAEppGenerator(
         # Random local contrast (per-image brightness wave)
         if torch.rand(1).item() < 0.25:
             freq = torch.rand(1, device=self.device).item() * 4 + 1
-            phase = torch.rand(1, device=self.device).item() * 6.28
+            phase = torch.rand(1, device=self.device).item() * 2 * math.pi
             H, W = canvas.shape[2], canvas.shape[3]
             x = torch.linspace(0, 1, W, device=self.device)
-            wave = (torch.sin(x * freq * 6.28 + phase) * 0.1).view(1, 1, 1, W)
+            wave = (torch.sin(x * freq * 2 * math.pi + phase) * 0.1).view(1, 1, 1, W)
             canvas = canvas + wave
 
         # Random rectangular erasure (20% chance)
