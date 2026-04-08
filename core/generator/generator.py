@@ -799,8 +799,8 @@ class VAEppGenerator(
             H, W = canvas.shape[2], canvas.shape[3]
             for bi in range(B):
                 if torch.rand(1).item() < 0.5:
-                    eh = torch.randint(10, H // 4, (1,)).item()
-                    ew = torch.randint(10, W // 4, (1,)).item()
+                    eh = torch.randint(10, max(11, H // 4), (1,)).item()
+                    ew = torch.randint(10, max(11, W // 4), (1,)).item()
                     ey = torch.randint(0, H - eh, (1,)).item()
                     ex = torch.randint(0, W - ew, (1,)).item()
                     # Erase to random color (not just black)
