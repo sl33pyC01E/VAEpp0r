@@ -281,9 +281,9 @@ class FlattenInferenceTab(tk.Frame):
             try:
                 import torch
                 sys.path.insert(0, PROJECT_ROOT)
-                from core.generator import VAEppGenerator
+                from core.generator import VAEpp0rGenerator
 
-                gen = VAEppGenerator(360, 640, device="cuda", bank_size=200,
+                gen = VAEpp0rGenerator(360, 640, device="cuda", bank_size=200,
                                           n_base_layers=64)
                 gen.build_banks()
                 images = gen.generate(4)
@@ -707,9 +707,9 @@ class FlattenVideoInferenceTab(tk.Frame):
             try:
                 import torch
                 sys.path.insert(0, PROJECT_ROOT)
-                from core.generator import VAEppGenerator
+                from core.generator import VAEpp0rGenerator
 
-                gen = VAEppGenerator(360, 640, device="cuda", bank_size=200,
+                gen = VAEpp0rGenerator(360, 640, device="cuda", bank_size=200,
                                           n_base_layers=64)
                 gen.build_banks()
                 with torch.no_grad():
@@ -1078,8 +1078,8 @@ class FSQInferenceTab(tk.Frame):
             try:
                 import torch
                 sys.path.insert(0, PROJECT_ROOT)
-                from core.generator import VAEppGenerator
-                gen = VAEppGenerator(360, 640, device="cuda", bank_size=200,
+                from core.generator import VAEpp0rGenerator
+                gen = VAEpp0rGenerator(360, 640, device="cuda", bank_size=200,
                                           n_base_layers=64)
                 gen.build_banks()
                 images = gen.generate(4)

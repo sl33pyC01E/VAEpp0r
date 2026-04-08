@@ -1,5 +1,5 @@
 @echo off
-echo VAEpp Setup
+echo VAEpp0r Setup
 echo.
 
 if exist venv (

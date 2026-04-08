@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
 echo ============================================
-echo   VAEpp Installer
+echo   VAEpp0r Installer
 echo ============================================
 echo.
 
