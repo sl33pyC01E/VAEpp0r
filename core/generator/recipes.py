@@ -91,6 +91,7 @@ class RecipesMixin:
                 print(f"  [{i+1}/{n_clips}]", flush=True)
         self._recipe_pool = recipes
         self._motion_pool_T = T
+        self._motion_pool_kwargs = seq_kwargs
         self._motion_pool_call_count = 0
         print(f"Recipe pool done: {n_clips} recipes", flush=True)
 
@@ -348,7 +349,7 @@ class RecipesMixin:
         # Periodic refresh
         self._motion_pool_call_count += 1
         if self._motion_pool_call_count % refresh_interval == 0:
-            self._refresh_motion_pool()
+            self._refresh_motion_pool(**getattr(self, '_motion_pool_kwargs', {}))
 
         # Render B recipes
         T_expected = self._motion_pool_T

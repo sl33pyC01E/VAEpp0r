@@ -1070,7 +1070,7 @@ class FSQInferenceTab(tk.Frame):
             self.status.config(text=f"Error: {e}")
 
     def test_synthetic(self):
-        if self.vae is None:
+        if self.vae is None or self.fsq is None:
             self.status.config(text="Load a model first")
             return
         self.status.config(text="Generating...")
@@ -1091,7 +1091,7 @@ class FSQInferenceTab(tk.Frame):
         threading.Thread(target=_bg, daemon=True).start()
 
     def test_image(self):
-        if self.vae is None:
+        if self.vae is None or self.fsq is None:
             self.status.config(text="Load a model first")
             return
         path = self.input_path.get().strip()

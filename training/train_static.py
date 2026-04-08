@@ -178,6 +178,14 @@ def train(args):
             model.load_state_dict(ckpt, strict=False)
         print(f"Resumed from {args.resume} at step {global_step}")
 
+    if args.fresh_opt and global_step > 0:
+        opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr),
+                                weight_decay=0.01)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=args.total_steps - global_step,
+            eta_min=float(args.lr) * 0.01)
+        print(f"  Fresh optimizer from step {global_step}")
+
     # -- Precision --
     amp_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16,
                  "fp32": torch.float32}[args.precision]
