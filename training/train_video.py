@@ -125,13 +125,15 @@ def train(args):
     logdir.mkdir(parents=True, exist_ok=True)
 
     # -- Model (3ch RGB, temporal ENABLED) --
-    # Read encoder/decoder config from checkpoint if resuming
+    # Read encoder/decoder/latent config from checkpoint if resuming
     enc_ch = 64
     dec_ch = (256, 128, 64)
+    latent_ch = args.latent_ch
     if args.resume:
         _ckpt_peek = torch.load(args.resume, map_location="cpu", weights_only=False)
         _cfg = _ckpt_peek.get("config", {})
         enc_ch = _cfg.get("encoder_channels", 64)
+        latent_ch = _cfg.get("latent_channels", args.latent_ch)
         dec_ch_str = _cfg.get("decoder_channels", "256,128,64")
         if isinstance(dec_ch_str, str):
             dec_ch = tuple(int(x) for x in dec_ch_str.split(","))
@@ -140,7 +142,7 @@ def train(args):
         del _ckpt_peek
 
     model = MiniVAE(
-        latent_channels=args.latent_ch,
+        latent_channels=latent_ch,
         image_channels=3,
         output_channels=3,
         encoder_channels=enc_ch,
@@ -276,7 +278,7 @@ def train(args):
             "scaler": scaler.state_dict(),
             "global_step": global_step,
             "config": {
-                "latent_channels": args.latent_ch,
+                "latent_channels": latent_ch,
                 "image_channels": 3,
                 "output_channels": 3,
                 "encoder_channels": enc_ch,
