@@ -156,7 +156,12 @@ class ShapesMixin:
         py = points[:, 1]
         if px.max() > px.min():
             px = (px - px.min()) / (px.max() - px.min()) * (S - 1)
+        else:
+            px.fill_(S // 2)
+        if py.max() > py.min():
             py = (py - py.min()) / (py.max() - py.min()) * (S - 1)
+        else:
+            py.fill_(S // 2)
         px = px.long().clamp(0, S - 1)
         py = py.long().clamp(0, S - 1)
 
@@ -221,8 +226,13 @@ class ShapesMixin:
             if pts[:, 0].max() > pts[:, 0].min():
                 pts[:, 0] = (pts[:, 0] - pts[:, 0].min()) / \
                     (pts[:, 0].max() - pts[:, 0].min()) * W * 0.8 + W * 0.1
+            else:
+                pts[:, 0] = W * 0.5
+            if pts[:, 1].max() > pts[:, 1].min():
                 pts[:, 1] = (pts[:, 1] - pts[:, 1].min()) / \
                     (pts[:, 1].max() - pts[:, 1].min()) * H * 0.8 + H * 0.1
+            else:
+                pts[:, 1] = H * 0.5
 
             # Place shapes at fractal positions
             for pi in range(len(positions)):

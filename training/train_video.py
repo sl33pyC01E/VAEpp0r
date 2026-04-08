@@ -67,23 +67,28 @@ def save_preview(model, gen, logdir, step, device, amp_dtype, T=8):
                    "-c:v", "libx264", "-crf", "18",
                    "-pix_fmt", "yuv420p", out_path]
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            try:
+                for t in range(T_show):
+                    # Clip 0: GT | Recon (top row)
+                    g0 = (gt[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    r0 = (rc[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    top = np.concatenate([g0, sep, r0], axis=1)
 
-            for t in range(T_show):
-                # Clip 0: GT | Recon (top row)
-                g0 = (gt[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                r0 = (rc[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                top = np.concatenate([g0, sep, r0], axis=1)
+                    # Clip 1: GT | Recon (bottom row)
+                    g1 = (gt[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    r1 = (rc[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    bot = np.concatenate([g1, sep, r1], axis=1)
 
-                # Clip 1: GT | Recon (bottom row)
-                g1 = (gt[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                r1 = (rc[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                bot = np.concatenate([g1, sep, r1], axis=1)
+                    frame = np.concatenate([top, hsep, bot], axis=0)
+                    proc.stdin.write(frame.tobytes())
 
-                frame = np.concatenate([top, hsep, bot], axis=0)
-                proc.stdin.write(frame.tobytes())
-
-            proc.stdin.close()
-            proc.wait()
+                proc.stdin.close()
+                proc.wait()
+            except Exception:
+                proc.stdin.close()
+                proc.kill()
+                proc.wait()
+                raise
 
         print(f"  preview: {stepped} ({T_show} frames)", flush=True)
     except Exception as e:

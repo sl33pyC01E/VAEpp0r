@@ -68,7 +68,6 @@ def save_preview(vae, bottleneck, gen, logdir, step, device, amp_dtype, T=8):
         rc_flat = recon_flat[:, T_flat - T_show:, :3].clamp(0, 1).float().cpu().numpy()
 
         del recon_vae, recon_flat, latent, lat, lat_recon
-        vae.train()
         bottleneck.train()
 
         H, W = gen.H, gen.W
