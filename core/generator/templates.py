@@ -114,7 +114,6 @@ class TemplateMixin:
         proj_norm = (proj - p_min) / (p_max - p_min + 1e-6)
         stripe_idx = (proj_norm * n).long().clamp(0, n - 1)
         for bi in range(B):
-            colors = self._sample_colors(n)  # (n, 3)
             for si in range(n):
                 mask = (stripe_idx == si).float().unsqueeze(0)  # (1, H, W)
                 lidx = torch.randint(0, self.n_base_layers, (1,)).item()
@@ -163,7 +162,7 @@ class TemplateMixin:
     def _tmpl_perspective(self, canvas, B):
         H, W = self.H, self.W
         # Vanishing point near top center
-        vp_y = torch.randint(int(H * 0.1), int(H * 0.35), (1,)).item()
+        vp_y = torch.randint(int(H * 0.1), max(int(H * 0.1) + 1, int(H * 0.35)), (1,)).item()
         vp_x = W // 2 + torch.randint(-W // 6, W // 6, (1,)).item()
         # Draw converging lines
         n_lines = torch.randint(5, 12, (1,)).item()
@@ -334,7 +333,7 @@ class TemplateMixin:
             mtn_color = self._sample_colors(1)[0] * 0.5 + 0.2
             for _ in range(n_mtn):
                 peak_x = torch.randint(0, W, (1,)).item()
-                peak_y = torch.randint(int(H * 0.15), horizon, (1,)).item()
+                peak_y = torch.randint(int(H * 0.15), max(int(H * 0.15) + 1, horizon), (1,)).item()
                 base_w = torch.randint(W // 6, W // 2, (1,)).item()
                 # Draw triangle
                 for row in range(peak_y, horizon):
@@ -359,7 +358,7 @@ class TemplateMixin:
                 canopy_r = torch.randint(8, 20, (1,)).item()
                 # Trunk
                 tw = max(2, canopy_r // 3)
-                canvas[bi, :, ty-trunk_h:ty, max(0,tx-tw):tx+tw] = \
+                canvas[bi, :, max(0, ty-trunk_h):ty, max(0,tx-tw):tx+tw] = \
                     torch.tensor([0.4, 0.25, 0.1], device=self.device).view(3, 1, 1)
                 # Canopy (approximate circle via square)
                 cy = ty - trunk_h - canopy_r
@@ -506,7 +505,7 @@ class TemplateMixin:
             for _ in range(n_trees):
                 tx = torch.randint(0, W, (1,)).item()
                 trunk_w = torch.randint(3, 12, (1,)).item()
-                trunk_top = torch.randint(int(H * 0.1), int(H * 0.4), (1,)).item()
+                trunk_top = torch.randint(int(H * 0.1), max(int(H * 0.1) + 1, int(H * 0.4)), (1,)).item()
                 trunk_c = torch.tensor([0.3, 0.2, 0.1], device=self.device
                     ).view(3, 1, 1) + torch.rand(3, 1, 1, device=self.device) * 0.1
                 x0 = max(0, tx - trunk_w // 2)

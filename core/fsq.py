@@ -102,9 +102,10 @@ class FSQ(nn.Module):
                                    H, W)
 
         # Map [-1, 1] -> [0, levels-1] integer
-        int_codes = torch.round(
-            z_groups * half_levels + half_levels).long().clamp(
-                0, self.levels - 1)
+        # Use round-then-shift to avoid banker's rounding collisions
+        # when half_levels is non-integer (even levels like 12)
+        int_codes = (torch.round(z_groups * half_levels).long()
+                     + (self.levels - 1) // 2).clamp(0, self.levels - 1)
 
         # Flatten to single index per group using mixed-radix
         # basis: [1, L, L^2, L^3, ...]
@@ -136,7 +137,7 @@ class FSQ(nn.Module):
         int_codes = torch.stack(channels, dim=2)
 
         # Map [0, levels-1] -> [-1, 1]
-        z_quant = (int_codes.float() - half_levels) / half_levels
+        z_quant = (int_codes.float() - (self.levels - 1) // 2) / half_levels
 
         # Reshape to (B, C, H, W)
         return z_quant.reshape(B, self.total_channels, H, W)

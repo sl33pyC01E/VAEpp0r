@@ -88,24 +88,24 @@ def save_preview(vae, bottleneck, gen, logdir, step, device, amp_dtype, T=8):
                    "-c:v", "libx264", "-crf", "18",
                    "-pix_fmt", "yuv420p", out_path]
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            try:
+                for t in range(T_show):
+                    rows = []
+                    for b in range(min(2, B)):
+                        g = (gt[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        v = (rc_vae[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        f_ = (rc_flat[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        row = np.concatenate([g, sep, v, sep, f_], axis=1)
+                        rows.append(row)
 
-            for t in range(T_show):
-                rows = []
-                for b in range(min(2, B)):
-                    g = (gt[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                    v = (rc_vae[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                    f_ = (rc_flat[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                    row = np.concatenate([g, sep, v, sep, f_], axis=1)
-                    rows.append(row)
-
-                if len(rows) == 2:
-                    frame = np.concatenate([rows[0], hsep, rows[1]], axis=0)
-                else:
-                    frame = rows[0]
-                proc.stdin.write(frame.tobytes())
-
-            proc.stdin.close()
-            proc.wait()
+                    if len(rows) == 2:
+                        frame = np.concatenate([rows[0], hsep, rows[1]], axis=0)
+                    else:
+                        frame = rows[0]
+                    proc.stdin.write(frame.tobytes())
+            finally:
+                proc.stdin.close()
+                proc.wait()
 
         print(f"  preview: {stepped} (GT | VAE | Flatten, {T_show} frames)",
               flush=True)

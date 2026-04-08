@@ -387,9 +387,8 @@ class RecipesMixin:
         if not hasattr(self, '_recipe_pool') or not self._recipe_pool:
             return
         import json, time as _time
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
+        d = os.path.dirname(os.path.abspath(path))
+        os.makedirs(d, exist_ok=True)
         # Save to the requested path
         with open(path, 'w') as f:
             json.dump(self._recipe_pool, f)

@@ -513,31 +513,30 @@ class FlattenVideoTab(tk.Frame):
                         try:
                             w, h = int(parts[0]), int(parts[1])
                         except (ValueError, TypeError):
-                            return
-                        if w <= 0 or h <= 0:
-                            return
-                        cmd = ["ffmpeg", "-v", "quiet", "-i", preview,
-                               "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
-                        raw = subprocess.run(cmd, capture_output=True).stdout
-                        fs = w * h * 3
-                        n = len(raw) // fs
-                        if n > 0:
-                            scale = min(900 / w, 350 / h, 1.0)
-                            dw = int(w * scale) if scale < 1 else w
-                            dh = int(h * scale) if scale < 1 else h
-                            self._video_frames = []
-                            for fi in range(n):
-                                arr = np.frombuffer(
-                                    raw[fi*fs:(fi+1)*fs],
-                                    dtype=np.uint8).reshape(h, w, 3)
-                                pil = Image.fromarray(arr)
-                                if scale < 1:
-                                    pil = pil.resize((dw, dh), BILINEAR)
-                                self._video_frames.append(
-                                    ImageTk.PhotoImage(pil))
-                            self._video_idx = 0
-                            self._play_gen += 1
-                            self._play_video_loop(self._play_gen)
+                            w, h = 0, 0
+                        if w > 0 and h > 0:
+                            cmd = ["ffmpeg", "-v", "quiet", "-i", preview,
+                                   "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+                            raw = subprocess.run(cmd, capture_output=True).stdout
+                            fs = w * h * 3
+                            n = len(raw) // fs
+                            if n > 0:
+                                scale = min(900 / w, 350 / h, 1.0)
+                                dw = int(w * scale) if scale < 1 else w
+                                dh = int(h * scale) if scale < 1 else h
+                                self._video_frames = []
+                                for fi in range(n):
+                                    arr = np.frombuffer(
+                                        raw[fi*fs:(fi+1)*fs],
+                                        dtype=np.uint8).reshape(h, w, 3)
+                                    pil = Image.fromarray(arr)
+                                    if scale < 1:
+                                        pil = pil.resize((dw, dh), BILINEAR)
+                                    self._video_frames.append(
+                                        ImageTk.PhotoImage(pil))
+                                self._video_idx = 0
+                                self._play_gen += 1
+                                self._play_video_loop(self._play_gen)
             except Exception:
                 pass
         self.after(5000, self._check_preview)
@@ -1392,30 +1391,29 @@ class FlattenVideoFSQTab(tk.Frame):
                         try:
                             w, h = int(parts[0]), int(parts[1])
                         except (ValueError, TypeError):
-                            return
-                        if w <= 0 or h <= 0:
-                            return
-                        cmd = ["ffmpeg", "-v", "quiet", "-i", preview,
-                               "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
-                        raw = subprocess.run(cmd, capture_output=True).stdout
-                        fs = w * h * 3
-                        n = len(raw) // fs
-                        if n > 0:
-                            scale = min(900 / w, 350 / h, 1.0)
-                            dw = int(w * scale) if scale < 1 else w
-                            dh = int(h * scale) if scale < 1 else h
-                            self._video_frames = []
-                            for fi in range(n):
-                                arr = np.frombuffer(
-                                    raw[fi*fs:(fi+1)*fs],
-                                    dtype=np.uint8).reshape(h, w, 3)
-                                pil = Image.fromarray(arr)
-                                if scale < 1:
-                                    pil = pil.resize((dw, dh), BILINEAR)
-                                self._video_frames.append(ImageTk.PhotoImage(pil))
-                            self._video_idx = 0
-                            self._play_gen += 1
-                            self._play_video_loop(self._play_gen)
+                            w, h = 0, 0
+                        if w > 0 and h > 0:
+                            cmd = ["ffmpeg", "-v", "quiet", "-i", preview,
+                                   "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+                            raw = subprocess.run(cmd, capture_output=True).stdout
+                            fs = w * h * 3
+                            n = len(raw) // fs
+                            if n > 0:
+                                scale = min(900 / w, 350 / h, 1.0)
+                                dw = int(w * scale) if scale < 1 else w
+                                dh = int(h * scale) if scale < 1 else h
+                                self._video_frames = []
+                                for fi in range(n):
+                                    arr = np.frombuffer(
+                                        raw[fi*fs:(fi+1)*fs],
+                                        dtype=np.uint8).reshape(h, w, 3)
+                                    pil = Image.fromarray(arr)
+                                    if scale < 1:
+                                        pil = pil.resize((dw, dh), BILINEAR)
+                                    self._video_frames.append(ImageTk.PhotoImage(pil))
+                                self._video_idx = 0
+                                self._play_gen += 1
+                                self._play_video_loop(self._play_gen)
             except Exception:
                 pass
         self.after(5000, self._check_preview)

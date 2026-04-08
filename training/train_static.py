@@ -42,7 +42,7 @@ def save_preview(model, gen, logdir, step, device, amp_dtype):
             recon, _ = model(x)
 
         T_r = recon.shape[1]
-        rc = recon[:, -1].clamp(0, 1).float().cpu().numpy()  # (8, 3, H, W)
+        rc = recon[:, -1, :3].clamp(0, 1).float().cpu().numpy()  # (8, 3, H, W)
         gt = images.cpu().numpy()  # (8, 3, H, W)
 
         del recon, x

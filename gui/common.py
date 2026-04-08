@@ -77,6 +77,8 @@ class ProcRunner:
         except Exception as e:
             self._append(f"\nERROR: {e}\n")
         finally:
+            if self.proc and self.proc.stdout:
+                self.proc.stdout.close()
             self.proc = None
 
     def stop(self):
