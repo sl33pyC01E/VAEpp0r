@@ -768,110 +768,81 @@ class VideoGenTab(tk.Frame):
         run_with_log(self, _do, on_done=_done)
 
     def gen_video(self):
-        # Stop any existing playback
         self._video_playing = False
-
         gen = self._get_gen()
         if gen.base_layers is None:
             gen.build_base_layers()
-
         T = self.T_var.get()
+        seq_kw = self._get_seq_kwargs()
         self.status.config(text=f"Generating T={T} clip...")
         self.update()
 
-        with torch.no_grad():
-            clip = gen.generate_sequence(
-                1, T=T,
-                use_physics=self.physics_var.get(),
-                use_rotation=self.rotation_var.get(),
-                use_zoom=self.zoom_var.get(),
-                use_fade=self.fade_var.get(),
-                use_viewport=self.viewport_var.get(),
-                use_fluid=self.fluid_var.get(),
-                pan_strength=self.pan_str.get(),
-                motion_strength=self.motion_str.get(),
-                viewport_pan=self.vp_pan_str.get(),
-                viewport_zoom=self.vp_zoom_str.get(),
-                viewport_rotation=self.vp_rot_str.get(),
-                fluid_strength=self.fluid_str.get(),
-            )  # (1, T, 3, H, W)
+        def _gen():
+            with torch.no_grad():
+                clip = gen.generate_sequence(1, T=T, **seq_kw)
+            # Convert to numpy on bg thread (no tkinter calls)
+            frames_np = []
+            scale = min(700 / gen.W, 400 / gen.H, 1.0)
+            for t in range(T):
+                arr = (clip[0, t].permute(1, 2, 0).cpu().numpy() * 255
+                       ).clip(0, 255).astype(np.uint8)
+                pil = Image.fromarray(arr)
+                if scale < 1.0:
+                    pil = pil.resize((int(gen.W * scale), int(gen.H * scale)),
+                                     BILINEAR)
+                frames_np.append(pil)
+            # Marshal to main thread for PhotoImage creation
+            self.after(0, lambda: self._show_frames(frames_np, T))
 
-        # Convert to PIL frames for inline playback
-        scale = min(700 / gen.W, 400 / gen.H, 1.0)
-        self._video_frames = []
-        for t in range(T):
-            arr = (clip[0, t].permute(1, 2, 0).cpu().numpy() * 255
-                   ).clip(0, 255).astype(np.uint8)
-            pil = Image.fromarray(arr)
-            if scale < 1.0:
-                pil = pil.resize((int(gen.W * scale), int(gen.H * scale)),
-                                 BILINEAR)
-            self._video_frames.append(ImageTk.PhotoImage(pil))
-
-        self._video_idx = 0
-        self._play_gen = getattr(self, '_play_gen', 0) + 1
-        self.status.config(text=f"Playing T={T} clip (looping)")
-        self._play_video_loop(self._play_gen)
+        run_with_log(self, _gen)
 
     def gen_grid(self):
         """Generate 8 clips, tile into a 4x2 grid, play inline."""
         self._video_playing = False
-
         gen = self._get_gen()
         if gen.base_layers is None:
             gen.build_base_layers()
-
         T = self.T_var.get()
+        seq_kw = self._get_seq_kwargs()
         self.status.config(text=f"Generating 8 clips T={T}...")
         self.update()
 
-        with torch.no_grad():
-            clips = gen.generate_sequence(
-                8, T=T,
-                use_physics=self.physics_var.get(),
-                use_rotation=self.rotation_var.get(),
-                use_zoom=self.zoom_var.get(),
-                use_fade=self.fade_var.get(),
-                use_viewport=self.viewport_var.get(),
-                use_fluid=self.fluid_var.get(),
-                pan_strength=self.pan_str.get(),
-                motion_strength=self.motion_str.get(),
-                viewport_pan=self.vp_pan_str.get(),
-                viewport_zoom=self.vp_zoom_str.get(),
-                viewport_rotation=self.vp_rot_str.get(),
-                fluid_strength=self.fluid_str.get(),
-            )  # (8, T, 3, H, W)
+        def _gen():
+            with torch.no_grad():
+                clips = gen.generate_sequence(8, T=T, **seq_kw)
+            H, W = gen.H, gen.W
+            sh, sw = H // 2, W // 2
+            gap = 2
+            grid_w = sw * 4 + gap * 3
+            grid_h = sh * 2 + gap
+            frames_pil = []
+            for ti in range(T):
+                grid = np.full((grid_h, grid_w, 3), 14, dtype=np.uint8)
+                for ci in range(8):
+                    frame = (clips[ci, ti].permute(1, 2, 0).cpu().numpy() * 255
+                             ).clip(0, 255).astype(np.uint8)
+                    small = np.array(Image.fromarray(frame).resize((sw, sh),
+                                     BILINEAR))
+                    r, c = ci // 4, ci % 4
+                    y = r * (sh + gap)
+                    x = c * (sw + gap)
+                    grid[y:y+sh, x:x+sw] = small
+                pil = Image.fromarray(grid)
+                scale = min(700 / grid_w, 400 / grid_h, 1.0)
+                if scale < 1.0:
+                    pil = pil.resize((int(grid_w * scale), int(grid_h * scale)),
+                                     BILINEAR)
+                frames_pil.append(pil)
+            self.after(0, lambda: self._show_frames(frames_pil, T))
 
-        # Build per-frame grids: shrink each clip to 1/4 size, tile 4x2
-        H, W = gen.H, gen.W
-        sh, sw = H // 2, W // 2
-        gap = 2
-        grid_w = sw * 4 + gap * 3
-        grid_h = sh * 2 + gap
+        run_with_log(self, _gen)
 
-        self._video_frames = []
-        for ti in range(T):
-            grid = np.full((grid_h, grid_w, 3), 14, dtype=np.uint8)
-            for ci in range(8):
-                frame = (clips[ci, ti].permute(1, 2, 0).cpu().numpy() * 255
-                         ).clip(0, 255).astype(np.uint8)
-                small = np.array(Image.fromarray(frame).resize((sw, sh),
-                                 BILINEAR))
-                r, c = ci // 4, ci % 4
-                y = r * (sh + gap)
-                x = c * (sw + gap)
-                grid[y:y+sh, x:x+sw] = small
-
-            pil = Image.fromarray(grid)
-            scale = min(700 / grid_w, 400 / grid_h, 1.0)
-            if scale < 1.0:
-                pil = pil.resize((int(grid_w * scale), int(grid_h * scale)),
-                                 BILINEAR)
-            self._video_frames.append(ImageTk.PhotoImage(pil))
-
+    def _show_frames(self, pil_frames, T):
+        """Create PhotoImages on main thread and start playback."""
+        self._video_frames = [ImageTk.PhotoImage(p) for p in pil_frames]
         self._video_idx = 0
         self._play_gen = getattr(self, '_play_gen', 0) + 1
-        self.status.config(text=f"Playing 8-clip grid T={T} (looping)")
+        self.status.config(text=f"Playing T={T} (looping)")
         self._play_video_loop(self._play_gen)
 
     def _play_video_loop(self, gen_id=None):
