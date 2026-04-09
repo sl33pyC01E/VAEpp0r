@@ -184,8 +184,12 @@ class FlattenDeflatten(nn.Module):
 # -- Preview -------------------------------------------------------------------
 
 @torch.no_grad()
-def save_preview(vae, bottleneck, gen, logdir, step, device, amp_dtype):
-    """Save GT | VAE-only | VAE+Flatten reconstruction comparison."""
+def save_preview(vae, bottleneck, gen, logdir, step, device, amp_dtype,
+                  encode_fn=None, decode_fn=None):
+    """Save GT | VAE | Flatten reconstruction comparison.
+    encode_fn/decode_fn override vae paths when provided (for FSQ)."""
+    _encode = encode_fn or (lambda x: vae.encode_video(x))
+    _decode = decode_fn or (lambda z: vae.decode_video(z))
     try:
         vae.eval()
         bottleneck.eval()
@@ -193,19 +197,21 @@ def save_preview(vae, bottleneck, gen, logdir, step, device, amp_dtype):
         x = images.unsqueeze(1).to(device)
 
         with torch.amp.autocast("cuda", dtype=amp_dtype):
-            # VAE only (no bottleneck)
-            recon_vae, latent = vae(x)
-            # VAE + bottleneck
-            lat = vae.encode_video(x)
-            lat_recon, flat = bottleneck(lat.squeeze(1))
-            recon_flat = vae.decode_video(lat_recon.unsqueeze(1))
+            # Encode (includes FSQ if present)
+            lat = _encode(x)
 
-        T_r = recon_vae.shape[1]
+            # VAE-only decode (no bottleneck)
+            recon_vae = _decode(lat)
+
+            # VAE + bottleneck
+            lat_recon, flat = bottleneck(lat.squeeze(1))
+            recon_flat = _decode(lat_recon.unsqueeze(1))
+
         gt = images.cpu().numpy()
         rc_vae = recon_vae[:, -1, :3].clamp(0, 1).float().cpu().numpy()
         rc_flat = recon_flat[:, -1, :3].clamp(0, 1).float().cpu().numpy()
 
-        del recon_vae, recon_flat, latent, lat, lat_recon
+        del recon_vae, recon_flat, lat, lat_recon
         bottleneck.train()
 
         H, W = gen.H, gen.W
@@ -290,10 +296,51 @@ def train(args):
     vae.requires_grad_(False)
     print(f"  VAE: {ch}ch, {lat_ch} latent, frozen")
 
+    # Load FSQ projections if present in checkpoint
+    fsq_cfg = vae_config.get("fsq", {})
+    fsq_layer = None
+    pre_quant = None
+    post_quant = None
+    if fsq_cfg and fsq_cfg.get("levels"):
+        from core.fsq import FSQ
+        levels = fsq_cfg["levels"]
+        if isinstance(levels, str):
+            levels = [int(x) for x in levels.split(",")]
+        fsq_dims = len(levels)
+        fsq_layer = FSQ(levels=levels).to(device)
+        pre_quant = nn.Conv2d(lat_ch, fsq_dims, 1).to(device)
+        post_quant = nn.Conv2d(fsq_dims, lat_ch, 1).to(device)
+        if ckpt.get("pre_quant"):
+            pre_quant.load_state_dict(ckpt["pre_quant"])
+        if ckpt.get("post_quant"):
+            post_quant.load_state_dict(ckpt["post_quant"])
+        pre_quant.eval()
+        post_quant.eval()
+        pre_quant.requires_grad_(False)
+        post_quant.requires_grad_(False)
+        print(f"  FSQ: levels={levels}, {fsq_dims} dims, frozen")
+
+    has_fsq = fsq_layer is not None
+
+    def encode_latent(x_in):
+        """Encode through VAE, and FSQ projections if present."""
+        lat = vae.encode_video(x_in)
+        if has_fsq:
+            B, Tp, C, Hl, Wl = lat.shape
+            lf = lat.reshape(B * Tp, C, Hl, Wl)
+            z_proj = pre_quant(lf)
+            z_q, _ = fsq_layer(z_proj)
+            lat = post_quant(z_q).reshape(B, Tp, C, Hl, Wl)
+        return lat
+
+    def decode_latent(lat_in):
+        """Decode through VAE."""
+        return vae.decode_video(lat_in)
+
     # Probe latent spatial dims
     with torch.no_grad():
         dummy = torch.randn(1, 1, ch, args.H, args.W, device=device)
-        lat_dummy = vae.encode_video(dummy)
+        lat_dummy = encode_latent(dummy)
         _, _, lat_C, lat_H, lat_W = lat_dummy.shape
     print(f"  Latent: ({lat_C}, {lat_H}, {lat_W}) = {lat_C * lat_H * lat_W} values")
     print(f"  Bottleneck: {args.bottleneck_ch}ch × {lat_H * lat_W} positions "
@@ -373,7 +420,8 @@ def train(args):
         }
 
     # Initial preview
-    save_preview(vae, bottleneck, gen, str(logdir), start_step, device, amp_dtype)
+    save_preview(vae, bottleneck, gen, str(logdir), start_step, device, amp_dtype,
+                 encode_fn=encode_latent, decode_fn=decode_latent)
 
     # -- Loop --
     t0 = time.time()
@@ -406,9 +454,9 @@ def train(args):
             x = images.unsqueeze(1).to(device)
 
             with torch.amp.autocast("cuda", dtype=amp_dtype):
-                # Encode through frozen VAE
+                # Encode through frozen VAE (+FSQ if present)
                 with torch.no_grad():
-                    latent = vae.encode_video(x).squeeze(1)  # (B, C, H, W)
+                    latent = encode_latent(x).squeeze(1)  # (B, C, H, W)
 
                 # Flatten + deflatten
                 lat_recon, flat = bottleneck(latent)
@@ -418,8 +466,8 @@ def train(args):
 
                 # Decode through frozen VAE for pixel loss
                 with torch.no_grad():
-                    gt_recon = vae.decode_video(latent.unsqueeze(1))
-                flat_recon = vae.decode_video(lat_recon.unsqueeze(1))
+                    gt_recon = decode_latent(latent.unsqueeze(1))
+                flat_recon = decode_latent(lat_recon.unsqueeze(1))
                 T_r = flat_recon.shape[1]
                 pixel_loss = F.mse_loss(flat_recon[:, -T_r:], gt_recon[:, -T_r:])
 
@@ -444,7 +492,8 @@ def train(args):
 
         if step % args.preview_every == 0:
             save_preview(vae, bottleneck, gen, str(logdir), step,
-                         device, amp_dtype)
+                         device, amp_dtype,
+                         encode_fn=encode_latent, decode_fn=decode_latent)
 
         if step % args.save_every == 0:
             d = _make_checkpoint()
