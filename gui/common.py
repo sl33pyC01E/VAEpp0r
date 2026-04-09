@@ -126,6 +126,64 @@ def parse_arch_config(config):
     return enc_ch, dec_ch
 
 
+def run_with_log(tab, fn, on_done=None):
+    """Run fn() on a background thread with stdout tee'd to tab.log.
+    Polling starts on the main thread before the worker launches.
+    on_done() is called on the main thread when fn() completes."""
+    import queue as _q
+    q = _q.Queue()
+    original_stdout = sys.stdout
+    done = [False]
+
+    class _Tee:
+        def write(self, s):
+            if original_stdout:
+                original_stdout.write(s)
+            if s.strip():
+                q.put(s.rstrip())
+        def flush(self):
+            if original_stdout:
+                original_stdout.flush()
+
+    def _poll():
+        batch = []
+        try:
+            while True:
+                batch.append(q.get_nowait())
+        except _q.Empty:
+            pass
+        if batch:
+            tab.log.insert(tk.END, "\n".join(batch) + "\n")
+            tab.log.see(tk.END)
+        if not done[0]:
+            tab.after(50, _poll)
+        else:
+            # Final flush
+            rest = []
+            try:
+                while True:
+                    rest.append(q.get_nowait())
+            except _q.Empty:
+                pass
+            if rest:
+                tab.log.insert(tk.END, "\n".join(rest) + "\n")
+                tab.log.see(tk.END)
+
+    def _worker():
+        sys.stdout = _Tee()
+        try:
+            fn()
+        finally:
+            sys.stdout = original_stdout
+            done[0] = True
+        if on_done:
+            tab.after(0, on_done)
+
+    # Start polling on main thread FIRST, then launch worker
+    tab.after(50, _poll)
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def make_log(parent):
     return tk.Text(parent, bg=BG_LOG, fg=FG, font=FONT_SMALL,
                    insertbackground=FG, height=10, wrap=tk.WORD,
