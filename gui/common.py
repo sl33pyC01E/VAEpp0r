@@ -312,13 +312,11 @@ def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
     """Run VAE encode → pre_quant → FSQ → post_quant → VAE decode in chunks.
 
     Returns:
-        recon_vae: VAE-only reconstruction (aligned to input[trim:])
         recon_fsq: FSQ reconstruction (aligned to input[trim:])
     """
     T = x.shape[1]
     if T <= chunk_size:
         with torch.amp.autocast("cuda", dtype=amp_dtype):
-            recon_vae, _ = vae(x)
             lat = vae.encode_video(x)
             B, Tp, C, Hl, Wl = lat.shape
             lat_flat = lat.reshape(B * Tp, C, Hl, Wl)
@@ -327,12 +325,11 @@ def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
             lat_q = post_quant(z_q)
             lat_q = lat_q.reshape(B, Tp, C, Hl, Wl)
             recon_fsq = vae.decode_video(lat_q)
-        return recon_vae, recon_fsq
+        return recon_fsq
 
     trim = getattr(vae, 'frames_to_trim', 0)
     output_per_chunk = chunk_size - trim
     target_len = T - trim
-    all_vae = []
     all_fsq = []
 
     chunk_start = 0
@@ -345,7 +342,6 @@ def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
             break
 
         with torch.amp.autocast("cuda", dtype=amp_dtype):
-            rc_vae, _ = vae(chunk)
             lat = vae.encode_video(chunk)
             B, Tp, C, Hl, Wl = lat.shape
             lat_flat = lat.reshape(B * Tp, C, Hl, Wl)
@@ -356,15 +352,14 @@ def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
             rc_fsq = vae.decode_video(lat_q)
 
         need = target_len - collected
-        keep = min(rc_vae.shape[1], rc_fsq.shape[1], need)
-        all_vae.append(rc_vae[:, :keep].float().cpu())
+        keep = min(rc_fsq.shape[1], need)
         all_fsq.append(rc_fsq[:, :keep].float().cpu())
         collected += keep
-        del rc_vae, rc_fsq, lat, lat_flat, z_proj, z_q, lat_q
+        del rc_fsq, lat, lat_flat, z_proj, z_q, lat_q
         torch.cuda.empty_cache()
 
         if chunk_end >= T or collected >= target_len:
             break
         chunk_start += output_per_chunk
 
-    return torch.cat(all_vae, dim=1), torch.cat(all_fsq, dim=1)
+    return torch.cat(all_fsq, dim=1)

@@ -1454,7 +1454,7 @@ class FSQVideoInferenceTab(tk.Frame):
         top = tk.Frame(self, bg=BG_PANEL, padx=10, pady=10)
         top.pack(fill="x", padx=5, pady=5)
 
-        tk.Label(top, text="FSQ Video Inference (VAE | FSQ)",
+        tk.Label(top, text="FSQ Video Inference (GT | FSQ)",
                  bg=BG_PANEL, fg=FG, font=FONT_TITLE).pack(anchor="w")
 
         row1 = tk.Frame(top, bg=BG_PANEL)
@@ -1549,26 +1549,25 @@ class FSQVideoInferenceTab(tk.Frame):
             self.status.config(text=f"Error: {e}")
 
     def _run_fsq_inference(self, clip, source_label=""):
-        """Run chunked FSQ inference on a clip tensor, show VAE|FSQ video."""
+        """Run chunked FSQ inference on a clip tensor, show GT|FSQ video."""
         import torch
         with torch.no_grad():
-            recon_vae, recon_fsq = chunked_fsq_inference(
+            recon_fsq = chunked_fsq_inference(
                 self.vae, self.fsq, self.pre_quant, self.post_quant, clip)
 
         trim = getattr(self.vae, 'frames_to_trim', 0)
-        T_vae = recon_vae.shape[1]
         T_fsq = recon_fsq.shape[1]
-        T_show = min(T_vae, T_fsq)
-
-        rc_vae = recon_vae[0, :T_show, :3].clamp(0, 1).float().cpu().numpy()
-        rc_fsq = recon_fsq[0, :T_show, :3].clamp(0, 1).float().cpu().numpy()
         T_in = clip.shape[1]
 
-        status = f"VAE | FSQ, T_in={T_in}, T_out={T_show}, trim={trim}"
+        gt = clip[0, trim:trim + T_fsq, :3].float().cpu().numpy()
+        rc_fsq = recon_fsq[0, :T_fsq, :3].clamp(0, 1).float().cpu().numpy()
+        T_show = min(len(gt), T_fsq)
+
+        status = f"GT | FSQ, T_in={T_in}, T_out={T_show}, trim={trim}"
         if source_label:
             status += f", src={source_label}"
         self.after(0, lambda: self.status.config(text=status))
-        self.after(0, self._show_video, rc_vae, rc_fsq, T_show)
+        self.after(0, self._show_video, gt, rc_fsq, T_show)
 
     def test_synthetic(self):
         if self.vae is None or self.fsq is None:
@@ -1642,8 +1641,8 @@ class FSQVideoInferenceTab(tk.Frame):
 
         threading.Thread(target=_bg, daemon=True).start()
 
-    def _show_video(self, rc_vae, rc_fsq, T_show):
-        """Play VAE|FSQ side by side as inline video loop, save mp4."""
+    def _show_video(self, gt, rc_fsq, T_show):
+        """Play GT|FSQ side by side as inline video loop, save mp4."""
         H, W = 360, 640
         sep = np.full((H, 4, 3), 14, dtype=np.uint8)
         frame_w = W * 2 + 4
@@ -1667,9 +1666,9 @@ class FSQVideoInferenceTab(tk.Frame):
         self._video_frames = []
         try:
             for t in range(T_show):
-                v = (rc_vae[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                g = (gt[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
                 q = (rc_fsq[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                frame = np.concatenate([v, sep, q], axis=1)
+                frame = np.concatenate([g, sep, q], axis=1)
                 proc.stdin.write(frame.tobytes())
                 pil = Image.fromarray(frame)
                 if scale < 1:
