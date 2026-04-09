@@ -48,8 +48,16 @@ class FlattenTab(tk.Frame):
         row2.pack(fill="x", pady=(5, 0))
         f, self.bottleneck_ch = make_spin(row2, "Bottleneck ch", default=6)
         f.pack(side="left", padx=(0, 10))
-        f, self.walk_var = make_float(row2, "Walk order", "raster")
-        f.pack(side="left", padx=(0, 10))
+        wf = tk.Frame(row2, bg=BG_PANEL)
+        tk.Label(wf, text="Walk order", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        self.walk_var = tk.StringVar(value="raster")
+        walk_menu = tk.OptionMenu(wf, self.walk_var, "raster", "hilbert")
+        walk_menu.config(bg=BG_INPUT, fg=FG, font=FONT_SMALL,
+                         activebackground=BG_PANEL, activeforeground=FG,
+                         highlightthickness=0, borderwidth=0)
+        walk_menu.pack(anchor="w")
+        wf.pack(side="left", padx=(0, 10))
         f, self.lr_var = make_float(row2, "LR", "1e-3")
         f.pack(side="left", padx=(0, 10))
         f, self.batch_var = make_spin(row2, "Batch", default=4)
@@ -426,8 +434,16 @@ class FlattenVideoTab(tk.Frame):
         row2.pack(fill="x", pady=(5, 0))
         f, self.bottleneck_ch = make_spin(row2, "Bottleneck ch", default=6)
         f.pack(side="left", padx=(0, 10))
-        f, self.walk_var = make_float(row2, "Walk order", "raster")
-        f.pack(side="left", padx=(0, 10))
+        wf = tk.Frame(row2, bg=BG_PANEL)
+        tk.Label(wf, text="Walk order", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        self.walk_var = tk.StringVar(value="raster")
+        walk_menu = tk.OptionMenu(wf, self.walk_var, "raster", "hilbert")
+        walk_menu.config(bg=BG_INPUT, fg=FG, font=FONT_SMALL,
+                         activebackground=BG_PANEL, activeforeground=FG,
+                         highlightthickness=0, borderwidth=0)
+        walk_menu.pack(anchor="w")
+        wf.pack(side="left", padx=(0, 10))
         f, self.lr_var = make_float(row2, "LR", "1e-3")
         f.pack(side="left", padx=(0, 10))
         f, self.batch_var = make_spin(row2, "Batch", default=1)
@@ -1723,8 +1739,16 @@ class FlattenFSQTab(tk.Frame):
         row2.pack(fill="x", pady=(5, 0))
         f, self.bottleneck_ch = make_spin(row2, "Bottleneck ch", default=6)
         f.pack(side="left", padx=(0, 10))
-        f, self.walk_var = make_float(row2, "Walk order", "raster")
-        f.pack(side="left", padx=(0, 10))
+        wf = tk.Frame(row2, bg=BG_PANEL)
+        tk.Label(wf, text="Walk order", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        self.walk_var = tk.StringVar(value="raster")
+        walk_menu = tk.OptionMenu(wf, self.walk_var, "raster", "hilbert")
+        walk_menu.config(bg=BG_INPUT, fg=FG, font=FONT_SMALL,
+                         activebackground=BG_PANEL, activeforeground=FG,
+                         highlightthickness=0, borderwidth=0)
+        walk_menu.pack(anchor="w")
+        wf.pack(side="left", padx=(0, 10))
         f, self.lr_var = make_float(row2, "LR", "1e-3")
         f.pack(side="left", padx=(0, 10))
         f, self.batch_var = make_spin(row2, "Batch", default=4)
@@ -1839,8 +1863,16 @@ class FlattenVideoFSQTab(tk.Frame):
         row2.pack(fill="x", pady=(5, 0))
         f, self.bottleneck_ch = make_spin(row2, "Bottleneck ch", default=6)
         f.pack(side="left", padx=(0, 10))
-        f, self.walk_var = make_float(row2, "Walk order", "raster")
-        f.pack(side="left", padx=(0, 10))
+        wf = tk.Frame(row2, bg=BG_PANEL)
+        tk.Label(wf, text="Walk order", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        self.walk_var = tk.StringVar(value="raster")
+        walk_menu = tk.OptionMenu(wf, self.walk_var, "raster", "hilbert")
+        walk_menu.config(bg=BG_INPUT, fg=FG, font=FONT_SMALL,
+                         activebackground=BG_PANEL, activeforeground=FG,
+                         highlightthickness=0, borderwidth=0)
+        walk_menu.pack(anchor="w")
+        wf.pack(side="left", padx=(0, 10))
         f, self.lr_var = make_float(row2, "LR", "1e-3")
         f.pack(side="left", padx=(0, 10))
         f, self.batch_var = make_spin(row2, "Batch", default=1)

@@ -86,22 +86,36 @@ class FlattenDeflatten(nn.Module):
         return inv
 
     def _hilbert_curve(self, h, w):
-        """Approximate Hilbert curve for non-power-of-2 grids.
+        """Hilbert curve for arbitrary grids.
         Returns list of flat indices in Hilbert order."""
-        # Use simple Z-order (Morton code) as approximation
-        # True Hilbert would need a proper implementation
-        n = h * w
+        # Compute on a power-of-2 grid, then filter to actual dims
+        order = max(h, w).bit_length()
+        n = 1 << order  # next power of 2
+
+        def d2xy(n, d):
+            """Convert Hilbert index d to (x, y) on n×n grid."""
+            x = y = 0
+            s = 1
+            while s < n:
+                rx = 1 if (d & 2) else 0
+                ry = 1 if ((d & 1) ^ rx) else 0
+                if ry == 0:
+                    if rx == 1:
+                        x = s - 1 - x
+                        y = s - 1 - y
+                    x, y = y, x
+                x += s * rx
+                y += s * ry
+                d >>= 2
+                s <<= 1
+            return x, y
+
         coords = []
-        for i in range(h):
-            for j in range(w):
-                # Interleave bits of i and j for Z-order
-                z = 0
-                for bit in range(16):
-                    z |= ((i >> bit) & 1) << (2 * bit + 1)
-                    z |= ((j >> bit) & 1) << (2 * bit)
-                coords.append((z, i * w + j))
-        coords.sort()
-        return [c[1] for c in coords]
+        for d in range(n * n):
+            x, y = d2xy(n, d)
+            if y < h and x < w:
+                coords.append(y * w + x)
+        return coords
 
     def flatten(self, latent):
         """Flatten spatial latent to 1D sequence with channel compression.
