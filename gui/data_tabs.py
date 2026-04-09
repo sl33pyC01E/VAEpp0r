@@ -61,6 +61,11 @@ class GeneratorTab(tk.Frame):
         self.preview_label = tk.Label(right, bg=BG)
         self.preview_label.pack(fill="both", expand=True)
 
+        # Log
+        self.log = make_log(right)
+        self.log.config(height=6)
+        self.log.pack(fill="x", side="bottom", pady=(2, 0))
+
         # Bank browser at bottom
         self.bank_frame = tk.Frame(right, bg=BG_PANEL, height=140)
         self.bank_frame.pack(fill="x", side="bottom", pady=(5, 0))
@@ -215,12 +220,6 @@ class GeneratorTab(tk.Frame):
                                      wraplength=350)
         self.stats_label.pack(fill="x", pady=(5, 0))
 
-        # Log
-        tk.Label(L, text="Log", bg=BG_PANEL, fg=ACCENT,
-                 font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
-        self.log = make_log(L)
-        self.log.config(height=8)
-        self.log.pack(fill="x", pady=(2, 0))
 
     def _get_slider_weights(self):
         """Read current slider values and normalize to probabilities."""
@@ -642,9 +641,9 @@ class VideoGenTab(tk.Frame):
                                 font=FONT_SMALL)
         self.status.pack(fill="x", pady=(5, 0))
 
-        self.log = make_log(top)
-        self.log.config(height=6)
-        self.log.pack(fill="x", pady=(5, 0))
+        self.log = make_log(self)
+        self.log.config(height=8)
+        self.log.pack(fill="x", padx=5, pady=(0, 5), side="bottom")
 
         # Preview — shows first frame of generated video
         self.preview_label = tk.Label(self, bg=BG)
