@@ -18,7 +18,8 @@ from gui.models_tabs import (
 )
 from gui.compress_tabs import (
     FlattenTab, FlattenInferenceTab, FlattenVideoTab, FlattenVideoInferenceTab,
-    FSQConvertTab, FSQInferenceTab, FlattenFSQTab, FlattenVideoFSQTab,
+    FSQTab, FSQVideoTab, FSQInferenceTab, FSQVideoInferenceTab,
+    FlattenFSQTab, FlattenVideoFSQTab,
 )
 
 
@@ -64,8 +65,10 @@ class App(tk.Tk):
         compress_frame = tk.Frame(nb, bg=BG)
         compress_nb = ttk.Notebook(compress_frame)
         compress_nb.pack(fill="both", expand=True)
-        compress_nb.add(FSQConvertTab(compress_nb), text="FSQ Convert")
+        compress_nb.add(FSQTab(compress_nb), text="FSQ")
         compress_nb.add(FSQInferenceTab(compress_nb), text="FSQ Inf")
+        compress_nb.add(FSQVideoTab(compress_nb), text="FSQ Video")
+        compress_nb.add(FSQVideoInferenceTab(compress_nb), text="FSQ Vid Inf")
         compress_nb.add(FlattenTab(compress_nb), text="Flatten")
         compress_nb.add(FlattenInferenceTab(compress_nb), text="Flatten Inf")
         compress_nb.add(FlattenVideoTab(compress_nb), text="Flatten Video")

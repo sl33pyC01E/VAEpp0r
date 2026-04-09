@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 from PIL import Image, ImageTk
 
 from gui.common import *
@@ -856,84 +857,134 @@ class FlattenVideoInferenceTab(tk.Frame):
         self.after(33, self._play_video_loop, self._play_gen)
 
 
-# -- FSQ Convert Tab -----------------------------------------------------------
-class FSQConvertTab(tk.Frame):
+# -- FSQ Tab (Static) ----------------------------------------------------------
+class FSQTab(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=BG)
+        self._preview_photo = None
+        self._last_mtime = 0
         self.build()
 
     def build(self):
         top = tk.Frame(self, bg=BG_PANEL, padx=10, pady=10)
         top.pack(fill="x", padx=5, pady=5)
 
-        tk.Label(top, text="FSQ Convert (Continuous -> Quantized)",
-                 bg=BG_PANEL, fg=FG, font=FONT_TITLE).pack(anchor="w")
-        tk.Label(top, text="Insert FSQ quantization layer into trained VAE. "
+        tk.Label(top, text="FSQ (Static)", bg=BG_PANEL, fg=FG,
+                 font=FONT_TITLE).pack(anchor="w")
+        tk.Label(top, text="Insert FSQ quantization into static VAE. "
                  "Fine-tune with straight-through estimator.",
                  bg=BG_PANEL, fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(5, 10))
 
         row1 = tk.Frame(top, bg=BG_PANEL)
         row1.pack(fill="x", pady=(5, 0))
-        f, self.src_var = make_float(row1, "Source VAE checkpoint",
+        f, self.src_var = make_float(row1, "VAE checkpoint",
             os.path.join(PROJECT_ROOT, "synthyper_logs", "latest.pt"), width=50)
+        f.pack(side="left", fill="x", expand=True)
+
+        row1b = tk.Frame(top, bg=BG_PANEL)
+        row1b.pack(fill="x", pady=(5, 0))
+        f, self.resume_var = make_float(row1b, "Resume", "", width=50)
         f.pack(side="left", fill="x", expand=True)
 
         row2 = tk.Frame(top, bg=BG_PANEL)
         row2.pack(fill="x", pady=(5, 0))
-        f, self.levels_var = make_spin(row2, "Levels", default=8)
+        f, self.levels_var = make_float(row2, "Levels", "8,8,8,8,8,8")
         f.pack(side="left", padx=(0, 10))
-        f, self.groups_var = make_spin(row2, "Groups", default=1)
+        f, self.lr_var = make_float(row2, "LR", "5e-4")
         f.pack(side="left", padx=(0, 10))
-        f, self.ch_per_group_var = make_spin(row2, "Ch/group", default=0)
+        f, self.batch_var = make_spin(row2, "Batch", default=4)
         f.pack(side="left", padx=(0, 10))
-        tk.Label(row2, text="(0 = auto from latent_ch / groups)",
-                 bg=BG_PANEL, fg=FG_DIM, font=FONT_SMALL).pack(
-                     side="left", pady=(15, 0))
+        f, self.steps_var = make_spin(row2, "Steps", default=5000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.prec_var = make_float(row2, "Precision", "bf16")
+        f.pack(side="left")
 
         row3 = tk.Frame(top, bg=BG_PANEL)
         row3.pack(fill="x", pady=(5, 0))
-        f, self.lr_var = make_float(row3, "LR", "5e-4")
+        f, self.H_var = make_spin(row3, "H", default=360)
         f.pack(side="left", padx=(0, 10))
-        f, self.steps_var = make_spin(row3, "Steps", default=5000)
+        f, self.W_var = make_spin(row3, "W", default=640)
         f.pack(side="left", padx=(0, 10))
-        f, self.batch_var = make_spin(row3, "Batch", default=4)
+        f, self.w_mse_var = make_float(row3, "w_mse", 1.0)
         f.pack(side="left", padx=(0, 10))
-        f, self.logdir_var = make_float(row3, "Log dir", "fsq_logs")
+        f, self.bank_var = make_spin(row3, "Bank size", default=5000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.layers_var = make_spin(row3, "Layers", default=128)
         f.pack(side="left")
+
+        row4 = tk.Frame(top, bg=BG_PANEL)
+        row4.pack(fill="x", pady=(5, 0))
+        f, self.log_every_var = make_spin(row4, "Log every", default=1)
+        f.pack(side="left", padx=(0, 10))
+        f, self.save_every_var = make_spin(row4, "Save every", default=1000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.preview_every_var = make_spin(row4, "Preview every", default=200)
+        f.pack(side="left", padx=(0, 10))
+        f, self.logdir_var = make_float(row4, "Log dir", "fsq_logs")
+        f.pack(side="left")
+
+        row5 = tk.Frame(top, bg=BG_PANEL)
+        row5.pack(fill="x", pady=(5, 0))
+        self.use_latest_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row5, text="Resume from latest.pt",
+                       variable=self.use_latest_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       font=FONT, command=self._toggle_latest).pack(side="left")
+        self.fresh_opt_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(row5, text="Fresh optimizer",
+                       variable=self.fresh_opt_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       font=FONT).pack(side="left")
 
         btn = tk.Frame(top, bg=BG_PANEL)
         btn.pack(fill="x", pady=(10, 0))
-        make_btn(btn, "Convert + Fine-tune", self.start, GREEN).pack(
-            side="left", padx=(0, 5))
-        make_btn(btn, "Stop", self.stop, BLUE).pack(side="left", padx=(0, 5))
-        make_btn(btn, "Kill", self.kill, RED).pack(side="left")
-
-        self.status = tk.Label(top, text="", bg=BG_PANEL, fg=FG_DIM,
-                                font=FONT_SMALL)
-        self.status.pack(fill="x", pady=(5, 0))
+        make_btn(btn, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
+        make_btn(btn, "Stop (save)", self.stop, BLUE).pack(side="left", padx=(0, 5))
+        make_btn(btn, "Kill", self.kill, RED).pack(side="left", padx=(0, 5))
+        self.disco_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(btn, text="Disco Quadrant", variable=self.disco_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, activeforeground=FG,
+                       font=FONT_SMALL).pack(side="left")
 
         self.preview_label = tk.Label(self, bg=BG)
         self.preview_label.pack(pady=5)
-        self._preview_photo = None
 
         self.log = make_log(self)
         self.log.pack(fill="both", expand=True, padx=5, pady=5)
         self.runner = ProcRunner(self.log)
-
         self._check_preview()
+
+    def _toggle_latest(self):
+        if self.use_latest_var.get():
+            logdir = self.logdir_var.get()
+            self.resume_var.set(os.path.join(PROJECT_ROOT, logdir, "latest.pt"))
+            self.fresh_opt_var.set(False)
 
     def start(self):
         cmd = [VENV_PYTHON, "-m", "experiments.fsq",
                "--vae-ckpt", self.src_var.get(),
-               "--levels", str(self.levels_var.get()),
-               "--n-groups", str(self.groups_var.get()),
+               "--levels", self.levels_var.get(),
                "--lr", self.lr_var.get(),
                "--batch-size", str(self.batch_var.get()),
                "--total-steps", str(self.steps_var.get()),
+               "--precision", self.prec_var.get(),
+               "--H", str(self.H_var.get()),
+               "--W", str(self.W_var.get()),
+               "--w-mse", self.w_mse_var.get(),
+               "--bank-size", str(self.bank_var.get()),
+               "--n-layers", str(self.layers_var.get()),
+               "--log-every", str(self.log_every_var.get()),
+               "--save-every", str(self.save_every_var.get()),
+               "--preview-every", str(self.preview_every_var.get()),
                "--logdir", self.logdir_var.get()]
-        cpg = self.ch_per_group_var.get()
-        if cpg > 0:
-            cmd.extend(["--ch-per-group", str(cpg)])
+        resume = self.resume_var.get().strip()
+        if resume:
+            cmd += ["--resume", resume]
+        if self.fresh_opt_var.get():
+            cmd += ["--fresh-opt"]
+        if self.disco_var.get():
+            cmd.append("--disco")
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop(self):
@@ -951,7 +1002,7 @@ class FSQConvertTab(tk.Frame):
         if os.path.exists(preview):
             try:
                 mtime = os.path.getmtime(preview)
-                if not hasattr(self, '_last_mtime') or mtime != self._last_mtime:
+                if mtime != self._last_mtime:
                     self._last_mtime = mtime
                     img = Image.open(preview)
                     scale = min(900 / img.width, 400 / img.height, 1.0)
@@ -964,6 +1015,217 @@ class FSQConvertTab(tk.Frame):
             except Exception:
                 pass
         self.after(5000, self._check_preview)
+
+
+# -- FSQ Video Tab -------------------------------------------------------------
+class FSQVideoTab(tk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._preview_photo = None
+        self._video_frames = []
+        self._play_gen = 0
+        self._video_idx = 0
+        self._last_mtime = 0
+        self.build()
+
+    def build(self):
+        top = tk.Frame(self, bg=BG_PANEL, padx=10, pady=10)
+        top.pack(fill="x", padx=5, pady=5)
+
+        tk.Label(top, text="FSQ Video (Temporal)", bg=BG_PANEL, fg=FG,
+                 font=FONT_TITLE).pack(anchor="w")
+        tk.Label(top, text="Insert FSQ quantization into temporal VAE. "
+                 "Fine-tune with straight-through estimator.",
+                 bg=BG_PANEL, fg=FG_DIM, font=FONT_SMALL).pack(anchor="w", pady=(5, 10))
+
+        row1 = tk.Frame(top, bg=BG_PANEL)
+        row1.pack(fill="x", pady=(5, 0))
+        f, self.src_var = make_float(row1, "Temporal VAE ckpt",
+            os.path.join(PROJECT_ROOT, "synthyper_video_logs", "latest.pt"),
+            width=50)
+        f.pack(side="left", fill="x", expand=True)
+
+        row1b = tk.Frame(top, bg=BG_PANEL)
+        row1b.pack(fill="x", pady=(5, 0))
+        f, self.resume_var = make_float(row1b, "Resume", "", width=50)
+        f.pack(side="left", fill="x", expand=True)
+
+        row2 = tk.Frame(top, bg=BG_PANEL)
+        row2.pack(fill="x", pady=(5, 0))
+        f, self.levels_var = make_float(row2, "Levels", "8,8,8,8,8,8")
+        f.pack(side="left", padx=(0, 10))
+        f, self.lr_var = make_float(row2, "LR", "5e-4")
+        f.pack(side="left", padx=(0, 10))
+        f, self.batch_var = make_spin(row2, "Batch", default=1)
+        f.pack(side="left", padx=(0, 10))
+        f, self.steps_var = make_spin(row2, "Steps", default=5000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.prec_var = make_float(row2, "Precision", "bf16")
+        f.pack(side="left")
+
+        row3 = tk.Frame(top, bg=BG_PANEL)
+        row3.pack(fill="x", pady=(5, 0))
+        f, self.H_var = make_spin(row3, "H", default=360)
+        f.pack(side="left", padx=(0, 10))
+        f, self.W_var = make_spin(row3, "W", default=640)
+        f.pack(side="left", padx=(0, 10))
+        f, self.T_var = make_spin(row3, "T (frames)", default=24)
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_mse_var = make_float(row3, "w_mse", 1.0)
+        f.pack(side="left", padx=(0, 10))
+        f, self.bank_var = make_spin(row3, "Bank size", default=5000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.layers_var = make_spin(row3, "Layers", default=128)
+        f.pack(side="left", padx=(0, 10))
+        f, self.pool_var = make_spin(row3, "Pool size", default=200)
+        f.pack(side="left")
+
+        row4 = tk.Frame(top, bg=BG_PANEL)
+        row4.pack(fill="x", pady=(5, 0))
+        f, self.log_every_var = make_spin(row4, "Log every", default=1)
+        f.pack(side="left", padx=(0, 10))
+        f, self.save_every_var = make_spin(row4, "Save every", default=1000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.preview_every_var = make_spin(row4, "Preview every", default=100)
+        f.pack(side="left", padx=(0, 10))
+        f, self.logdir_var = make_float(row4, "Log dir", "fsq_video_logs")
+        f.pack(side="left")
+
+        row5 = tk.Frame(top, bg=BG_PANEL)
+        row5.pack(fill="x", pady=(5, 0))
+        self.use_latest_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row5, text="Resume from latest.pt",
+                       variable=self.use_latest_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       font=FONT, command=self._toggle_latest).pack(side="left")
+        self.fresh_opt_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(row5, text="Fresh optimizer",
+                       variable=self.fresh_opt_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       font=FONT).pack(side="left")
+        self.grad_ckpt_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row5, text="Grad checkpoint",
+                       variable=self.grad_ckpt_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       font=FONT).pack(side="left")
+
+        btn = tk.Frame(top, bg=BG_PANEL)
+        btn.pack(fill="x", pady=(10, 0))
+        make_btn(btn, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
+        make_btn(btn, "Stop (save)", self.stop, BLUE).pack(side="left", padx=(0, 5))
+        make_btn(btn, "Kill", self.kill, RED).pack(side="left", padx=(0, 5))
+        self.disco_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(btn, text="Disco Quadrant", variable=self.disco_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, activeforeground=FG,
+                       font=FONT_SMALL).pack(side="left")
+
+        self.preview_label = tk.Label(self, bg=BG)
+        self.preview_label.pack(pady=5)
+
+        self.log = make_log(self)
+        self.log.pack(fill="both", expand=True, padx=5, pady=5)
+        self.runner = ProcRunner(self.log)
+        self._check_preview()
+
+    def _toggle_latest(self):
+        if self.use_latest_var.get():
+            logdir = self.logdir_var.get()
+            self.resume_var.set(os.path.join(PROJECT_ROOT, logdir, "latest.pt"))
+            self.fresh_opt_var.set(False)
+
+    def start(self):
+        cmd = [VENV_PYTHON, "-m", "experiments.fsq",
+               "--vae-ckpt", self.src_var.get(),
+               "--levels", self.levels_var.get(),
+               "--lr", self.lr_var.get(),
+               "--batch-size", str(self.batch_var.get()),
+               "--total-steps", str(self.steps_var.get()),
+               "--precision", self.prec_var.get(),
+               "--H", str(self.H_var.get()),
+               "--W", str(self.W_var.get()),
+               "--T", str(self.T_var.get()),
+               "--w-mse", self.w_mse_var.get(),
+               "--bank-size", str(self.bank_var.get()),
+               "--n-layers", str(self.layers_var.get()),
+               "--pool-size", str(self.pool_var.get()),
+               "--log-every", str(self.log_every_var.get()),
+               "--save-every", str(self.save_every_var.get()),
+               "--preview-every", str(self.preview_every_var.get()),
+               "--logdir", self.logdir_var.get()]
+        resume = self.resume_var.get().strip()
+        if resume:
+            cmd += ["--resume", resume]
+        if self.fresh_opt_var.get():
+            cmd += ["--fresh-opt"]
+        if self.disco_var.get():
+            cmd.append("--disco")
+        if self.grad_ckpt_var.get():
+            cmd.append("--grad-checkpoint")
+        self.runner.run(cmd, cwd=PROJECT_ROOT)
+
+    def stop(self):
+        logdir = os.path.join(PROJECT_ROOT, self.logdir_var.get())
+        os.makedirs(logdir, exist_ok=True)
+        Path(os.path.join(logdir, ".stop")).touch()
+        self.runner._append("[Stop file written]\n")
+
+    def kill(self):
+        self.runner.kill()
+
+    def _check_preview(self):
+        logdir = os.path.join(PROJECT_ROOT, self.logdir_var.get())
+        preview = os.path.join(logdir, "preview_latest.mp4")
+        if os.path.exists(preview):
+            try:
+                mtime = os.path.getmtime(preview)
+                if mtime != self._last_mtime:
+                    self._last_mtime = mtime
+                    self._video_frames = []
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-show_entries",
+                         "stream=width,height", "-of", "csv=p=0", preview],
+                        capture_output=True, text=True)
+                    parts = probe.stdout.strip().split(",")
+                    if len(parts) >= 2:
+                        try:
+                            w, h = int(parts[0]), int(parts[1])
+                        except (ValueError, TypeError):
+                            w, h = 0, 0
+                        if w > 0 and h > 0:
+                            cmd = ["ffmpeg", "-v", "quiet", "-i", preview,
+                                   "-f", "rawvideo", "-pix_fmt", "rgb24",
+                                   "pipe:1"]
+                            raw = subprocess.run(cmd, capture_output=True).stdout
+                            fs = w * h * 3
+                            n = len(raw) // fs
+                            if n > 0:
+                                scale = min(700 / w, 300 / h, 1.0)
+                                dw = int(w * scale) if scale < 1 else w
+                                dh = int(h * scale) if scale < 1 else h
+                                for fi in range(n):
+                                    arr = np.frombuffer(
+                                        raw[fi*fs:(fi+1)*fs],
+                                        dtype=np.uint8).reshape(h, w, 3)
+                                    pil = Image.fromarray(arr)
+                                    if scale < 1:
+                                        pil = pil.resize((dw, dh), BILINEAR)
+                                    self._video_frames.append(
+                                        ImageTk.PhotoImage(pil))
+                                self._video_idx = 0
+                                self._play_gen += 1
+                                self._play_preview_loop(self._play_gen)
+            except Exception:
+                pass
+        self.after(5000, self._check_preview)
+
+    def _play_preview_loop(self, gen_id=None):
+        if gen_id != self._play_gen or not self._video_frames:
+            return
+        self._video_idx = self._video_idx % len(self._video_frames)
+        self.preview_label.config(image=self._video_frames[self._video_idx])
+        self._video_idx += 1
+        self.after(33, self._play_preview_loop, self._play_gen)
 
 
 # -- FSQ Inference Tab ---------------------------------------------------------
@@ -1051,19 +1313,29 @@ class FSQInferenceTab(tk.Frame):
             self.vae.eval()
             self.vae.requires_grad_(False)
 
-            # Load FSQ
+            # Load FSQ + projections
             fsq_cfg = config.get("fsq", {})
-            levels = fsq_cfg.get("levels", 8)
-            n_groups = fsq_cfg.get("n_groups", 1)
-            cpg = fsq_cfg.get("channels_per_group", lat // n_groups)
-            self.fsq = FSQ(levels=levels, n_groups=n_groups,
-                           channels_per_group=cpg).cuda()
+            levels = fsq_cfg.get("levels", [8, 8, 8, 8, 8, 8])
+            if isinstance(levels, str):
+                levels = [int(x) for x in levels.split(",")]
+            fsq_dims = len(levels)
+            self.fsq = FSQ(levels=levels).cuda()
+            self.pre_quant = nn.Conv2d(lat, fsq_dims, 1).cuda()
+            self.post_quant = nn.Conv2d(fsq_dims, lat, 1).cuda()
+            if ckpt.get("pre_quant"):
+                self.pre_quant.load_state_dict(ckpt["pre_quant"])
+            if ckpt.get("post_quant"):
+                self.post_quant.load_state_dict(ckpt["post_quant"])
+            self.pre_quant.eval()
+            self.post_quant.eval()
+            self.pre_quant.requires_grad_(False)
+            self.post_quant.requires_grad_(False)
 
             step = ckpt.get("global_step", ckpt.get("step", "?"))
             codes = self.fsq.num_codes
             self.status.config(
-                text=f"VAE: {ch}ch lat={lat} | FSQ: {levels} levels, "
-                     f"{n_groups} groups, {cpg}ch/group, {codes:,} codes, "
+                text=f"VAE: {ch}ch lat={lat} | FSQ: {levels}, "
+                     f"{codes:,} codes, "
                      f"step {step}, {loaded} weights")
         except Exception as e:
             self.status.config(text=f"Error: {e}")
@@ -1123,7 +1395,9 @@ class FSQInferenceTab(tk.Frame):
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
             recon_cont, _ = self.vae(x)
             lat = self.vae.encode_video(x).squeeze(1)
-            lat_q, indices = self.fsq(lat)
+            z_proj = self.pre_quant(lat)
+            z_q, indices = self.fsq(z_proj)
+            lat_q = self.post_quant(z_q)
             recon_fsq = self.vae.decode_video(lat_q.unsqueeze(1))
 
         gt = images[:, :3].cpu().numpy() if images.dim() == 4 else images[:, :, :3].cpu().numpy()
@@ -1160,7 +1434,200 @@ class FSQInferenceTab(tk.Frame):
                              BILINEAR)
         self._preview_photo = ImageTk.PhotoImage(pil)
         self.preview_label.config(image=self._preview_photo)
-        self.status.config(text="GT | Continuous | FSQ")
+        self.status.config(text="VAE | FSQ")
+
+
+# -- FSQ Video Inference Tab ---------------------------------------------------
+class FSQVideoInferenceTab(tk.Frame):
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self.vae = None
+        self.fsq = None
+        self.pre_quant = None
+        self.post_quant = None
+        self._video_frames = []
+        self._play_gen = 0
+        self._video_idx = 0
+        self.build()
+
+    def build(self):
+        top = tk.Frame(self, bg=BG_PANEL, padx=10, pady=10)
+        top.pack(fill="x", padx=5, pady=5)
+
+        tk.Label(top, text="FSQ Video Inference (VAE | FSQ)",
+                 bg=BG_PANEL, fg=FG, font=FONT_TITLE).pack(anchor="w")
+
+        row1 = tk.Frame(top, bg=BG_PANEL)
+        row1.pack(fill="x", pady=(10, 0))
+        f, self.ckpt_var = make_float(row1, "FSQ checkpoint",
+            os.path.join(PROJECT_ROOT, "fsq_video_logs", "latest.pt"), width=50)
+        f.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        make_btn(row1, "Load", self.load_model, GREEN, width=8).pack(
+            side="left", pady=(15, 0))
+
+        row2 = tk.Frame(top, bg=BG_PANEL)
+        row2.pack(fill="x", pady=(5, 0))
+        f, self.T_var = make_spin(row2, "T (frames)", default=24, width=6)
+        f.pack(side="left", padx=(0, 10))
+        make_btn(row2, "Test Synthetic", self.test_synthetic, ACCENT).pack(
+            side="left", padx=(0, 5))
+
+        self.status = tk.Label(top, text="No model loaded", bg=BG_PANEL,
+                                fg=FG_DIM, font=FONT_SMALL)
+        self.status.pack(fill="x", pady=(5, 0))
+
+        self.preview_label = tk.Label(self, bg=BG)
+        self.preview_label.pack(fill="both", expand=True, pady=5)
+
+    def load_model(self):
+        sys.path.insert(0, PROJECT_ROOT)
+        from core.model import MiniVAE
+        from core.fsq import FSQ
+
+        try:
+            ckpt_path = self.ckpt_var.get().strip()
+            if not os.path.isabs(ckpt_path):
+                ckpt_path = os.path.join(PROJECT_ROOT, ckpt_path)
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            config = ckpt.get("config", {})
+            ch = config.get("image_channels", 3)
+            lat = config.get("latent_channels", 32)
+            temporal = config.get("temporal", True)
+
+            if temporal:
+                etd = (True, True, False)
+                dtu = (False, True, True)
+            else:
+                etd = (False, False, False)
+                dtu = (False, False, False)
+
+            enc_ch, dec_ch = parse_arch_config(config)
+            self.vae = MiniVAE(
+                latent_channels=lat, image_channels=ch, output_channels=ch,
+                encoder_channels=enc_ch, decoder_channels=dec_ch,
+                encoder_time_downscale=etd, decoder_time_upscale=dtu,
+            ).cuda()
+
+            src_sd = ckpt.get("model", ckpt)
+            target_sd = self.vae.state_dict()
+            loaded = 0
+            for k, v in src_sd.items():
+                if k in target_sd and v.shape == target_sd[k].shape:
+                    target_sd[k] = v
+                    loaded += 1
+            self.vae.load_state_dict(target_sd)
+            self.vae.eval()
+            self.vae.requires_grad_(False)
+
+            # Load FSQ + projections
+            fsq_cfg = config.get("fsq", {})
+            levels = fsq_cfg.get("levels", [8, 8, 8, 8, 8, 8])
+            if isinstance(levels, str):
+                levels = [int(x) for x in levels.split(",")]
+            fsq_dims = len(levels)
+            self.fsq = FSQ(levels=levels).cuda()
+            self.pre_quant = nn.Conv2d(lat, fsq_dims, 1).cuda()
+            self.post_quant = nn.Conv2d(fsq_dims, lat, 1).cuda()
+            if ckpt.get("pre_quant"):
+                self.pre_quant.load_state_dict(ckpt["pre_quant"])
+            if ckpt.get("post_quant"):
+                self.post_quant.load_state_dict(ckpt["post_quant"])
+            self.pre_quant.eval()
+            self.post_quant.eval()
+            self.pre_quant.requires_grad_(False)
+            self.post_quant.requires_grad_(False)
+
+            step = ckpt.get("global_step", ckpt.get("step", "?"))
+            codes = self.fsq.num_codes
+            self.status.config(
+                text=f"VAE: {ch}ch lat={lat} temporal={temporal} | "
+                     f"FSQ: {levels}, {codes:,} codes, "
+                     f"step {step}, {loaded} weights")
+        except Exception as e:
+            self.status.config(text=f"Error: {e}")
+
+    def test_synthetic(self):
+        if self.vae is None or self.fsq is None:
+            self.status.config(text="Load a model first")
+            return
+
+        T = self.T_var.get()
+        self.status.config(text=f"Generating T={T} clip...")
+
+        def _bg():
+            try:
+                import torch
+                sys.path.insert(0, PROJECT_ROOT)
+                from core.generator import VAEppGenerator
+
+                gen = VAEppGenerator(360, 640, device="cuda", bank_size=200,
+                                          n_base_layers=64)
+                gen.build_banks()
+                gen.build_motion_pool(n_clips=50, T=T)
+
+                with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    clip = gen.generate_sequence(1, T=T).cuda()
+
+                    # VAE path (no FSQ)
+                    recon_vae, _ = self.vae(clip)
+
+                    # FSQ path
+                    lat = self.vae.encode_video(clip)
+                    Bl, Tp, Cl, Hl, Wl = lat.shape
+                    lat_flat = lat.reshape(Bl * Tp, Cl, Hl, Wl)
+                    z_proj = self.pre_quant(lat_flat)
+                    z_q, indices = self.fsq(z_proj)
+                    lat_q = self.post_quant(z_q)
+                    lat_q = lat_q.reshape(Bl, Tp, Cl, Hl, Wl)
+                    recon_fsq = self.vae.decode_video(lat_q)
+
+                T_vae = recon_vae.shape[1]
+                T_fsq = recon_fsq.shape[1]
+                T_show = min(T_vae, T_fsq)
+
+                rc_vae = recon_vae[0, T_vae - T_show:, :3].clamp(0, 1).float().cpu().numpy()
+                rc_fsq = recon_fsq[0, T_fsq - T_show:, :3].clamp(0, 1).float().cpu().numpy()
+
+                self.after(0, lambda: self.status.config(
+                    text=f"VAE | FSQ, T={T_show}"))
+                self.after(0, self._show_video, rc_vae, rc_fsq, T_show)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self.after(0, lambda: self.status.config(text=f"Error: {e}"))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
+    def _show_video(self, rc_vae, rc_fsq, T_show):
+        """Play VAE|FSQ side by side as inline video loop."""
+        H, W = 360, 640
+        sep = np.full((H, 4, 3), 14, dtype=np.uint8)
+        frame_w = W * 2 + 4
+        scale = min(700 / frame_w, 400 / H, 1.0)
+        dw = int(frame_w * scale) if scale < 1 else frame_w
+        dh = int(H * scale) if scale < 1 else H
+
+        self._video_frames = []
+        for t in range(T_show):
+            v = (rc_vae[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+            q = (rc_fsq[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+            frame = np.concatenate([v, sep, q], axis=1)
+            pil = Image.fromarray(frame)
+            if scale < 1:
+                pil = pil.resize((dw, dh), BILINEAR)
+            self._video_frames.append(ImageTk.PhotoImage(pil))
+
+        self._video_idx = 0
+        self._play_gen += 1
+        self._play_preview_loop(self._play_gen)
+
+    def _play_preview_loop(self, gen_id=None):
+        if gen_id != self._play_gen or not self._video_frames:
+            return
+        self._video_idx = self._video_idx % len(self._video_frames)
+        self.preview_label.config(image=self._video_frames[self._video_idx])
+        self._video_idx += 1
+        self.after(33, self._play_preview_loop, self._play_gen)
 
 
 # -- Flatten FSQ Tab -----------------------------------------------------------

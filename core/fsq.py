@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Finite Scalar Quantization (FSQ) for Tiny Game VAE.
+"""Finite Scalar Quantization (FSQ).
 
-Quantizes continuous latents into discrete tokens using per-channel
-rounding with straight-through estimator. No codebook lookup needed —
-codes are implicit from the quantized scalar values.
+Quantizes continuous latents into discrete tokens using per-dimension
+rounding with straight-through estimator. No codebook, no learnable
+parameters — codes are implicit from the quantized scalar values.
 
-Default config: 2 groups x 6ch x 12 levels = 12^6 ~ 2.99M codes/group.
+Reference: Mentzer et al., "Finite Scalar Quantization: VQ-VAE Made Simple"
+https://arxiv.org/abs/2309.15505
 """
 
 import torch
@@ -16,134 +17,91 @@ import math
 class FSQ(nn.Module):
     """Finite Scalar Quantization layer.
 
-    Splits latent channels into groups, quantizes each channel to a
-    fixed number of levels using round + straight-through estimator.
+    Bounds each dimension via tanh, rounds to nearest integer,
+    and applies straight-through estimator for gradients.
+
+    No learnable parameters.
 
     Args:
-        levels: number of quantization levels per channel (default 12).
-        n_groups: number of independent quantization groups (default 2).
-        channels_per_group: channels in each group (default 6).
-            Total channels = n_groups * channels_per_group.
+        levels: list of ints, quantization levels per dimension.
+                e.g. [8,8,8,8,8,8] for 6 dims with 8 levels each,
+                or [3,5,7,9,11] for heterogeneous levels.
     """
 
-    def __init__(self, levels=12, n_groups=2, channels_per_group=6):
+    def __init__(self, levels):
         super().__init__()
-        self.levels = levels
-        self.n_groups = n_groups
-        self.channels_per_group = channels_per_group
-        self.total_channels = n_groups * channels_per_group
-        max_index = levels ** channels_per_group
-        if max_index > 2**63 - 1:
-            raise ValueError(
-                f"levels^channels_per_group = {levels}^{channels_per_group} "
-                f"overflows int64. Increase n_groups or decrease "
-                f"levels/channels_per_group.")
-        self.codebook_size = max_index
+        self._levels = levels
+        self.dim = len(levels)
+        self.codebook_size = math.prod(levels)
 
-        # Precompute basis for index computation
-        basis = torch.tensor(
-            [levels ** i for i in range(channels_per_group)],
-            dtype=torch.long)
-        self.register_buffer("basis", basis)
+        # Half-levels for bounding: (L-1)/2 per dimension
+        half_levels = torch.tensor([(L - 1) / 2 for L in levels])
+        self.register_buffer("_half_levels", half_levels)
+
+        # Multipliers for index computation
+        mults = []
+        acc = 1
+        for L in levels:
+            mults.append(acc)
+            acc *= L
+        self.register_buffer("_mults", torch.tensor(mults, dtype=torch.long))
+
+    @property
+    def levels(self):
+        return list(self._levels)
 
     @property
     def num_codes(self):
-        """Total number of unique codes per group."""
         return self.codebook_size
-
-    def _bound(self, z):
-        """Bound values to [-1, 1] using tanh."""
-        return torch.tanh(z)
-
-    def _quantize(self, z_bounded):
-        """Quantize bounded [-1, 1] values to discrete levels."""
-        half_levels = (self.levels - 1) / 2
-        # Map [-1, 1] -> [0, levels-1], round, then back to [-1, 1]
-        shifted = (z_bounded + 1) / 2 * (self.levels - 1)
-        quantized = torch.round(shifted).clamp(0, self.levels - 1)
-        return quantized / half_levels - 1
 
     def forward(self, z):
         """Quantize latent tensor with straight-through estimator.
 
         Args:
-            z: (B, C, H, W) continuous latent tensor.
-                C must equal n_groups * channels_per_group.
+            z: (B, D, ...) continuous latent where D = self.dim.
 
         Returns:
-            z_quant: (B, C, H, W) quantized tensor (gradients flow through).
-            indices: (B, n_groups, H, W) integer indices per group.
+            z_quant: same shape, quantized (gradients flow via STE).
+            indices: (B, ...) integer indices in [0, codebook_size).
         """
-        B, C, H, W = z.shape
-        assert C == self.total_channels, (
-            f"Expected {self.total_channels} channels, got {C}")
+        # Move channels to last dim for per-dimension ops
+        # (B, D, ...) -> (B, ..., D)
+        perm_fwd = [0] + list(range(2, z.ndim)) + [1]
+        perm_back = [0, z.ndim - 1] + list(range(1, z.ndim - 1))
+        z_last = z.permute(*perm_fwd)
 
-        # Bound to [-1, 1]
-        z_bounded = self._bound(z)
+        # Bound: tanh -> scale to [-(L-1)/2, (L-1)/2] per dim
+        half = self._half_levels
+        z_bounded = half * torch.tanh(z_last)
 
-        # Quantize
-        z_quantized = self._quantize(z_bounded)
+        # Round to nearest integer
+        z_rounded = torch.round(z_bounded)
 
         # Straight-through estimator
-        z_quant = z_bounded + (z_quantized - z_bounded).detach()
+        z_quant = z_bounded + (z_rounded - z_bounded).detach()
 
-        # Compute indices per group
-        indices = self.codes_to_indices(z_quantized)
+        # Compute flat indices
+        dim_indices = (z_rounded + half).long()
+        indices = (dim_indices * self._mults).sum(dim=-1)
+
+        # Back to channel-first: (B, ..., D) -> (B, D, ...)
+        z_quant = z_quant.permute(*perm_back).contiguous()
 
         return z_quant, indices
-
-    def codes_to_indices(self, z_quant):
-        """Convert quantized values to integer indices.
-
-        Args:
-            z_quant: (B, C, H, W) quantized tensor with values in [-1, 1].
-
-        Returns:
-            (B, n_groups, H, W) integer indices in [0, codebook_size).
-        """
-        B, C, H, W = z_quant.shape
-        half_levels = (self.levels - 1) / 2
-
-        # Reshape to groups: (B, n_groups, cpg, H, W)
-        z_groups = z_quant.reshape(B, self.n_groups, self.channels_per_group,
-                                   H, W)
-
-        # Map [-1, 1] -> [0, levels-1] integer
-        int_codes = torch.round(
-            (z_groups + 1) / 2 * (self.levels - 1)
-        ).long().clamp(0, self.levels - 1)
-
-        # Flatten to single index per group using mixed-radix
-        # basis: [1, L, L^2, L^3, ...]
-        indices = (int_codes * self.basis.view(1, 1, -1, 1, 1)).sum(dim=2)
-
-        return indices  # (B, n_groups, H, W)
 
     def indices_to_codes(self, indices):
         """Convert integer indices back to quantized values.
 
         Args:
-            indices: (B, n_groups, H, W) integer indices.
+            indices: (B, ...) integer indices.
 
         Returns:
-            (B, C, H, W) quantized tensor with values in [-1, 1].
+            (B, ..., D) quantized tensor with values in [-(L-1)/2, (L-1)/2].
         """
-        B, G, H, W = indices.shape
-        half_levels = (self.levels - 1) / 2
-
-        # Decompose mixed-radix index into per-channel integers
-        channels = []
+        codes = []
         remaining = indices
-        for i in range(self.channels_per_group):
-            ch = remaining % self.levels
-            remaining = remaining // self.levels
-            channels.append(ch)
-
-        # (B, G, cpg, H, W) integer codes
-        int_codes = torch.stack(channels, dim=2)
-
-        # Map [0, levels-1] -> [-1, 1]
-        z_quant = int_codes.float() / half_levels - 1
-
-        # Reshape to (B, C, H, W)
-        return z_quant.reshape(B, self.total_channels, H, W)
+        for i, L in enumerate(self._levels):
+            half = (L - 1) / 2
+            codes.append((remaining % L).float() - half)
+            remaining = remaining // L
+        return torch.stack(codes, dim=-1)
