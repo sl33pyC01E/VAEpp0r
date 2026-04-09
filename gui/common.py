@@ -250,23 +250,27 @@ def chunked_vae_inference(model, x, chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloa
 
 @torch.no_grad()
 def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
-                               amp_dtype=torch.bfloat16):
-    """Run VAE encode → flatten/deflatten → VAE decode in chunks."""
+                               amp_dtype=torch.bfloat16,
+                               encode_fn=None, decode_fn=None):
+    """Run VAE encode → flatten/deflatten → VAE decode in chunks.
+    encode_fn/decode_fn override vae paths when provided (for FSQ)."""
+    _encode = encode_fn or (lambda c: vae.encode_video(c))
+    _decode = decode_fn or (lambda z: vae.decode_video(z))
     T = x.shape[1]
     if T <= chunk_size:
         with torch.amp.autocast("cuda", dtype=amp_dtype):
-            recon_vae, _ = vae(x)
-            lat = vae.encode_video(x)
+            lat = _encode(x)
+            recon_vae = _decode(lat)
             B, Tp, C, Hl, Wl = lat.shape
             lat_flat = lat.reshape(B * Tp, C, Hl, Wl)
             lat_recon, _ = bottleneck(lat_flat)
             lat_recon = lat_recon.reshape(B, Tp, C, Hl, Wl)
-            recon_flat = vae.decode_video(lat_recon)
+            recon_flat = _decode(lat_recon)
         return recon_vae, recon_flat, lat
 
     trim = getattr(vae, 'frames_to_trim', 0)
     output_per_chunk = chunk_size - trim
-    target_len = T - trim  # total recon frames we want
+    target_len = T - trim
     all_vae = []
     all_flat = []
     all_lat = []
@@ -281,13 +285,13 @@ def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
             break
 
         with torch.amp.autocast("cuda", dtype=amp_dtype):
-            rc_vae, _ = vae(chunk)
-            lat = vae.encode_video(chunk)
+            lat = _encode(chunk)
+            rc_vae = _decode(lat)
             B, Tp, C, Hl, Wl = lat.shape
             lat_f = lat.reshape(B * Tp, C, Hl, Wl)
             lat_r, _ = bottleneck(lat_f)
             lat_r = lat_r.reshape(B, Tp, C, Hl, Wl)
-            rc_flat = vae.decode_video(lat_r)
+            rc_flat = _decode(lat_r)
 
         need = target_len - collected
         keep = min(rc_vae.shape[1], rc_flat.shape[1], need)

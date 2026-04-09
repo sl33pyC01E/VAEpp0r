@@ -2221,10 +2221,39 @@ class FlattenFSQInferenceTab(tk.Frame):
             self.vae.load_state_dict(target_sd)
             self.vae.eval()
             self.vae.requires_grad_(False)
+
+            # Load FSQ projections if present
+            fsq_cfg = config.get("fsq", {})
+            self.fsq_layer = None
+            self.pre_quant = None
+            self.post_quant = None
+            if fsq_cfg and fsq_cfg.get("levels"):
+                from core.fsq import FSQ
+                levels = fsq_cfg["levels"]
+                if isinstance(levels, str):
+                    levels = [int(x) for x in levels.split(",")]
+                fsq_dims = len(levels)
+                self.fsq_layer = FSQ(levels=levels).cuda()
+                self.pre_quant = nn.Conv2d(lat, fsq_dims, 1).cuda()
+                self.post_quant = nn.Conv2d(fsq_dims, lat, 1).cuda()
+                if ckpt.get("pre_quant"):
+                    self.pre_quant.load_state_dict(ckpt["pre_quant"])
+                if ckpt.get("post_quant"):
+                    self.post_quant.load_state_dict(ckpt["post_quant"])
+                self.pre_quant.eval()
+                self.post_quant.eval()
+
             with torch.no_grad():
                 dummy = torch.randn(1, 1, ch, 360, 640, device="cuda")
-                _, _, lat_C, lat_H, lat_W = self.vae.encode_video(dummy).shape
-                del dummy
+                lat_d = self.vae.encode_video(dummy)
+                if self.fsq_layer is not None:
+                    B, Tp, C, Hl, Wl = lat_d.shape
+                    lf = lat_d.reshape(B * Tp, C, Hl, Wl)
+                    z = self.pre_quant(lf)
+                    z_q, _ = self.fsq_layer(z)
+                    lat_d = self.post_quant(z_q).reshape(B, Tp, C, Hl, Wl)
+                _, _, lat_C, lat_H, lat_W = lat_d.shape
+                del dummy, lat_d
             bn_path = self.bn_ckpt.get().strip()
             if not os.path.isabs(bn_path):
                 bn_path = os.path.join(PROJECT_ROOT, bn_path)
@@ -2239,9 +2268,21 @@ class FlattenFSQInferenceTab(tk.Frame):
             self.bottleneck.eval()
             self._image_channels = ch
             step = bn_ckpt.get("step", "?")
-            self.status.config(text=f"VAE: {ch}ch lat={lat} | BN: {bn_ch}ch, step {step}, walk={walk}")
+            fsq_str = f" + FSQ" if self.fsq_layer else ""
+            self.status.config(text=f"VAE{fsq_str}: {ch}ch lat={lat} | BN: {bn_ch}ch, step {step}, walk={walk}")
         except Exception as e:
             self.status.config(text=f"Error: {e}")
+
+    def _encode(self, x):
+        """Encode through VAE + FSQ if present."""
+        lat = self.vae.encode_video(x)
+        if self.fsq_layer is not None:
+            B, Tp, C, Hl, Wl = lat.shape
+            lf = lat.reshape(B * Tp, C, Hl, Wl)
+            z = self.pre_quant(lf)
+            z_q, _ = self.fsq_layer(z)
+            lat = self.post_quant(z_q).reshape(B, Tp, C, Hl, Wl)
+        return lat
 
     def test_synthetic(self):
         if self.vae is None or self.bottleneck is None:
@@ -2258,9 +2299,9 @@ class FlattenFSQInferenceTab(tk.Frame):
                 images = gen.generate(4)
                 x = images.unsqueeze(1).cuda()
                 with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                    recon_vae, _ = self.vae(x)
-                    lat = self.vae.encode_video(x).squeeze(1)
-                    lat_recon, _ = self.bottleneck(lat)
+                    lat = self._encode(x)
+                    recon_vae = self.vae.decode_video(lat)
+                    lat_recon, _ = self.bottleneck(lat.squeeze(1))
                     recon_flat = self.vae.decode_video(lat_recon.unsqueeze(1))
                 gt = images.cpu().numpy()
                 rc_vae = recon_vae[:, -1, :3].clamp(0, 1).float().cpu().numpy()
@@ -2293,9 +2334,9 @@ class FlattenFSQInferenceTab(tk.Frame):
                     t = torch.cat([t, torch.zeros(ch - 3, 360, 640)], dim=0)
                 x = t.unsqueeze(0).unsqueeze(0).cuda()
                 with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-                    recon_vae, _ = self.vae(x)
-                    lat = self.vae.encode_video(x).squeeze(1)
-                    lat_recon, _ = self.bottleneck(lat)
+                    lat = self._encode(x)
+                    recon_vae = self.vae.decode_video(lat)
+                    lat_recon, _ = self.bottleneck(lat.squeeze(1))
                     recon_flat = self.vae.decode_video(lat_recon.unsqueeze(1))
                 gt = t[:3].unsqueeze(0).numpy()
                 rc_vae = recon_vae[:, -1, :3].clamp(0, 1).float().cpu().numpy()
@@ -2410,10 +2451,39 @@ class FlattenVideoFSQInferenceTab(tk.Frame):
             self.vae.load_state_dict(target_sd)
             self.vae.eval()
             self.vae.requires_grad_(False)
+
+            # Load FSQ projections if present
+            fsq_cfg = config.get("fsq", {})
+            self.fsq_layer = None
+            self.pre_quant = None
+            self.post_quant = None
+            if fsq_cfg and fsq_cfg.get("levels"):
+                from core.fsq import FSQ
+                levels = fsq_cfg["levels"]
+                if isinstance(levels, str):
+                    levels = [int(x) for x in levels.split(",")]
+                fsq_dims = len(levels)
+                self.fsq_layer = FSQ(levels=levels).cuda()
+                self.pre_quant = nn.Conv2d(lat, fsq_dims, 1).cuda()
+                self.post_quant = nn.Conv2d(fsq_dims, lat, 1).cuda()
+                if ckpt.get("pre_quant"):
+                    self.pre_quant.load_state_dict(ckpt["pre_quant"])
+                if ckpt.get("post_quant"):
+                    self.post_quant.load_state_dict(ckpt["post_quant"])
+                self.pre_quant.eval()
+                self.post_quant.eval()
+
             with torch.no_grad():
                 dummy = torch.randn(1, 8, ch, 360, 640, device="cuda")
-                _, _, lat_C, lat_H, lat_W = self.vae.encode_video(dummy).shape
-                del dummy
+                lat_d = self.vae.encode_video(dummy)
+                if self.fsq_layer is not None:
+                    B, Tp, C, Hl, Wl = lat_d.shape
+                    lf = lat_d.reshape(B * Tp, C, Hl, Wl)
+                    z = self.pre_quant(lf)
+                    z_q, _ = self.fsq_layer(z)
+                    lat_d = self.post_quant(z_q).reshape(B, Tp, C, Hl, Wl)
+                _, _, lat_C, lat_H, lat_W = lat_d.shape
+                del dummy, lat_d
             bn_path = self.bn_ckpt.get().strip()
             if not os.path.isabs(bn_path):
                 bn_path = os.path.join(PROJECT_ROOT, bn_path)
@@ -2427,11 +2497,23 @@ class FlattenVideoFSQInferenceTab(tk.Frame):
             self.bottleneck.load_state_dict(bn_ckpt["bottleneck"])
             self.bottleneck.eval()
             step = bn_ckpt.get("step", "?")
+            fsq_str = f" + FSQ" if self.fsq_layer else ""
             self.status.config(
-                text=f"VAE: {ch}ch lat={lat} temporal | BN: {bn_ch}ch, "
+                text=f"VAE{fsq_str}: {ch}ch lat={lat} temporal | BN: {bn_ch}ch, "
                      f"step {step}, walk={walk}, {loaded} weights")
         except Exception as e:
             self.status.config(text=f"Error: {e}")
+
+    def _encode(self, x):
+        """Encode through VAE + FSQ if present."""
+        lat = self.vae.encode_video(x)
+        if self.fsq_layer is not None:
+            B, Tp, C, Hl, Wl = lat.shape
+            lf = lat.reshape(B * Tp, C, Hl, Wl)
+            z = self.pre_quant(lf)
+            z_q, _ = self.fsq_layer(z)
+            lat = self.post_quant(z_q).reshape(B, Tp, C, Hl, Wl)
+        return lat
 
     def test_synthetic(self):
         if self.vae is None or self.bottleneck is None:
@@ -2449,7 +2531,9 @@ class FlattenVideoFSQInferenceTab(tk.Frame):
                 with torch.no_grad():
                     clip = gen.generate_sequence(1, T=T).cuda()
                     recon_vae, recon_flat, lat = chunked_flatten_inference(
-                        self.vae, self.bottleneck, clip)
+                        self.vae, self.bottleneck, clip,
+                        encode_fn=self._encode,
+                        decode_fn=self.vae.decode_video)
                 T_vae = recon_vae.shape[1]
                 T_flat = recon_flat.shape[1]
                 T_in = clip.shape[1]
@@ -2496,7 +2580,9 @@ class FlattenVideoFSQInferenceTab(tk.Frame):
                                                          device="cuda")], dim=2)
                 with torch.no_grad():
                     recon_vae, recon_flat, lat = chunked_flatten_inference(
-                        self.vae, self.bottleneck, clip)
+                        self.vae, self.bottleneck, clip,
+                        encode_fn=self._encode,
+                        decode_fn=self.vae.decode_video)
                 T_vae = recon_vae.shape[1]
                 T_flat = recon_flat.shape[1]
                 T_in = clip.shape[1]
