@@ -215,6 +215,13 @@ class GeneratorTab(tk.Frame):
                                      wraplength=350)
         self.stats_label.pack(fill="x", pady=(5, 0))
 
+        # Log
+        tk.Label(L, text="Log", bg=BG_PANEL, fg=ACCENT,
+                 font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
+        self.log = make_log(L)
+        self.log.config(height=8)
+        self.log.pack(fill="x", pady=(2, 0))
+
     def _get_slider_weights(self):
         """Read current slider values and normalize to probabilities."""
         sw = [self.w_circle.get(), self.w_rect.get(), self.w_triangle.get(),
@@ -264,13 +271,26 @@ class GeneratorTab(tk.Frame):
         self.gen.template_probs = torch.tensor(tw_vals, device=self.gen.device)
         return self.gen
 
+    def _log(self, msg):
+        """Append a message to the log widget (thread-safe)."""
+        def _append():
+            self.log.insert(tk.END, msg if msg.endswith("\n") else msg + "\n")
+            self.log.see(tk.END)
+        if threading.current_thread() is threading.main_thread():
+            _append()
+        else:
+            self.after(0, _append)
+
     def build_banks(self):
         self.gen = None
         gen = self._get_gen()
         self.stats_label.config(text="Building banks...")
+        self._log("Building banks...")
         self.update()
         def _build():
             gen.build_banks()
+            self._log(f"Banks built: {gen.bank_size} shapes, "
+                      f"{len(gen.base_layers) if gen.base_layers else 0} layers")
             self.after(0, self._update_stats)
             self.after(0, self._update_bank_browser)
         threading.Thread(target=_build, daemon=True).start()
@@ -281,9 +301,11 @@ class GeneratorTab(tk.Frame):
             self.stats_label.config(text="Build banks first!")
             return
         self.stats_label.config(text="Refreshing layers...")
+        self._log("Refreshing layers...")
         self.update()
         def _refresh():
             gen.refresh_base_layers()
+            self._log(f"Layers refreshed: {len(gen.base_layers)} layers")
             self.after(0, self._update_stats)
         threading.Thread(target=_refresh, daemon=True).start()
 
@@ -321,21 +343,25 @@ class GeneratorTab(tk.Frame):
             self.stats_label.config(text="Nothing to save")
             return
         gen.save_to_bank_dir(self.bank_dir)
+        self._log(f"Bank saved to {self.bank_dir}")
         self._update_stats()
 
     def load_bank(self):
         gen = self._get_gen()
         gen.load_bank_dir(self.bank_dir)
+        self._log(f"Bank loaded: {gen.bank_size} shapes")
         self._update_stats()
         self._update_bank_browser()
 
     def build_accumulate(self):
         gen = self._get_gen()
+        n = self.bank_size_var.get()
         self.stats_label.config(text="Building + accumulating...")
+        self._log(f"Accumulating {n} new shapes...")
         self.update()
         def _build():
             new_shapes = []
-            for i in range(self.bank_size_var.get()):
+            for i in range(n):
                 new_shapes.append(gen._render_one_shape())
             new_bank = torch.stack(new_shapes)
             if gen.shape_bank is not None:
@@ -344,13 +370,13 @@ class GeneratorTab(tk.Frame):
                 gen.shape_bank = new_bank
             gen.bank_size = gen.shape_bank.shape[0]
             gen.build_base_layers()
+            self._log(f"Accumulated: now {gen.bank_size} shapes total")
             self.after(0, self._update_stats)
             self.after(0, self._update_bank_browser)
         threading.Thread(target=_build, daemon=True).start()
 
     def empty_banks(self):
         """Delete all bank files from disk and clear memory."""
-        import shutil
         bank_dir = self.bank_dir
         if os.path.isdir(bank_dir):
             for f in os.listdir(bank_dir):
@@ -366,6 +392,7 @@ class GeneratorTab(tk.Frame):
         self._bank_thumbs = []
         self.bank_canvas.delete("all")
         self.stats_label.config(text="Banks emptied")
+        self._log("Banks emptied")
 
     def disco_quadrant(self):
         """Activate quadrant mode, build bank, deactivate quadrant mode."""
@@ -373,10 +400,12 @@ class GeneratorTab(tk.Frame):
         gen = self._get_gen()
         gen.disco_quadrant = True
         self.stats_label.config(text="Disco quadrant: building banks...")
+        self._log("Disco quadrant: building banks...")
         self.update()
         def _build():
             gen.build_banks()
             gen.disco_quadrant = False
+            self._log(f"Disco banks built: {gen.bank_size} shapes")
             self.after(0, self._update_stats)
             self.after(0, self._update_bank_browser)
         threading.Thread(target=_build, daemon=True).start()
@@ -613,6 +642,10 @@ class VideoGenTab(tk.Frame):
                                 font=FONT_SMALL)
         self.status.pack(fill="x", pady=(5, 0))
 
+        self.log = make_log(top)
+        self.log.config(height=6)
+        self.log.pack(fill="x", pady=(5, 0))
+
         # Preview — shows first frame of generated video
         self.preview_label = tk.Label(self, bg=BG)
         self.preview_label.pack(fill="both", expand=True, pady=5)
@@ -636,13 +669,25 @@ class VideoGenTab(tk.Frame):
                         working_size=self.bank_var.get())
         return self.gen
 
+    def _log(self, msg):
+        """Append a message to the log widget (thread-safe)."""
+        def _append():
+            self.log.insert(tk.END, msg if msg.endswith("\n") else msg + "\n")
+            self.log.see(tk.END)
+        if threading.current_thread() is threading.main_thread():
+            _append()
+        else:
+            self.after(0, _append)
+
     def build_banks(self):
         self.gen = None  # force recreate with current settings
         gen = self._get_gen()
         self.status.config(text="Building banks...")
+        self._log("Building banks...")
         self.update()
         def _build():
             gen.build_banks()
+            self._log(f"Banks ready: {gen.bank_size} shapes")
             self.after(0, lambda: self.status.config(
                 text=f"Banks ready: {gen.bank_size} shapes"))
         threading.Thread(target=_build, daemon=True).start()
@@ -669,11 +714,14 @@ class VideoGenTab(tk.Frame):
             gen.build_base_layers()
         T = self.T_var.get()
         self.status.config(text=f"Building motion pool T={T}...")
+        self._log(f"Building motion pool T={T}...")
         self.update()
         def _build():
             gen.build_motion_pool(n_clips=200, T=T, **self._get_seq_kwargs())
+            stats = gen.motion_pool_stats()
+            self._log(f"Pool ready: {stats}")
             self.after(0, lambda: self.status.config(
-                text=f"Pool ready: {gen.motion_pool_stats()}"))
+                text=f"Pool ready: {stats}"))
         threading.Thread(target=_build, daemon=True).start()
 
     def save_pool(self):
@@ -682,6 +730,7 @@ class VideoGenTab(tk.Frame):
         os.makedirs(os.path.dirname(pool_path), exist_ok=True)
         gen.save_motion_pool(pool_path)
         self.status.config(text=f"Saved pool to {pool_path}")
+        self._log(f"Pool saved to {pool_path}")
 
     def load_pool(self):
         gen = self._get_gen()
@@ -690,8 +739,10 @@ class VideoGenTab(tk.Frame):
         stats = gen.motion_pool_stats()
         if stats:
             self.status.config(text=f"Loaded pool: {stats['count']} recipes")
+            self._log(f"Pool loaded: {stats['count']} recipes")
         else:
             self.status.config(text="No recipes found in bank/")
+            self._log("No recipes found in bank/")
 
     def empty_pool(self):
         """Delete all recipe files and clear pool from memory."""
@@ -703,6 +754,7 @@ class VideoGenTab(tk.Frame):
         gen = self._get_gen()
         gen._recipe_pool = []
         self.status.config(text="Recipe pool emptied")
+        self._log("Recipe pool emptied")
 
     def disco_pool(self):
         """Build recipes with randomized parameters for each recipe."""
@@ -712,6 +764,7 @@ class VideoGenTab(tk.Frame):
 
         n = 200
         self.status.config(text=f"Disco: building {n} randomized recipes...")
+        self._log(f"Disco pool: building {n} randomized recipes...")
         self.update()
 
         def _disco():
@@ -758,6 +811,7 @@ class VideoGenTab(tk.Frame):
             gen.template_probs = orig_template_probs
 
             gen._motion_pool_T = T
+            self._log(f"Disco pool ready: {len(gen._recipe_pool)} recipes")
             self.after(0, lambda: self.status.config(
                 text=f"Disco pool: {len(gen._recipe_pool)} recipes"))
 
