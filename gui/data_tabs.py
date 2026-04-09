@@ -673,16 +673,18 @@ class VideoGenTab(tk.Frame):
 
     def build_pool(self):
         gen = self._get_gen()
-        if gen.base_layers is None:
-            gen.build_base_layers()
         T = self.T_var.get()
         self.status.config(text=f"Building motion pool T={T}...")
         self.update()
         seq_kw = self._get_seq_kwargs()
+        def _fn():
+            if gen.base_layers is None:
+                gen.build_base_layers()
+            gen.build_motion_pool(n_clips=200, T=T, **seq_kw)
         def _done():
             stats = gen.motion_pool_stats()
             self.status.config(text=f"Pool ready: {stats}")
-        run_with_log(self, lambda: gen.build_motion_pool(n_clips=200, T=T, **seq_kw), on_done=_done)
+        run_with_log(self, _fn, on_done=_done)
 
     def save_pool(self):
         gen = self._get_gen()
@@ -715,14 +717,13 @@ class VideoGenTab(tk.Frame):
     def disco_pool(self):
         """Build recipes with randomized parameters for each recipe."""
         gen = self._get_gen()
-        if gen.base_layers is None:
-            gen.build_base_layers()
-
         n = 200
         self.status.config(text=f"Disco: building {n} randomized recipes...")
         self.update()
 
         def _do():
+            if gen.base_layers is None:
+                gen.build_base_layers()
             orig_shape_probs = gen.shape_probs.clone()
             orig_texture_probs = gen.texture_probs.clone()
             orig_template_probs = gen.template_probs.clone()
@@ -770,14 +771,14 @@ class VideoGenTab(tk.Frame):
     def gen_video(self):
         self._video_playing = False
         gen = self._get_gen()
-        if gen.base_layers is None:
-            gen.build_base_layers()
         T = self.T_var.get()
         seq_kw = self._get_seq_kwargs()
         self.status.config(text=f"Generating T={T} clip...")
         self.update()
 
         def _gen():
+            if gen.base_layers is None:
+                gen.build_base_layers()
             with torch.no_grad():
                 clip = gen.generate_sequence(1, T=T, **seq_kw)
             # Convert to numpy on bg thread (no tkinter calls)
@@ -800,14 +801,14 @@ class VideoGenTab(tk.Frame):
         """Generate 8 clips, tile into a 4x2 grid, play inline."""
         self._video_playing = False
         gen = self._get_gen()
-        if gen.base_layers is None:
-            gen.build_base_layers()
         T = self.T_var.get()
         seq_kw = self._get_seq_kwargs()
         self.status.config(text=f"Generating 8 clips T={T}...")
         self.update()
 
         def _gen():
+            if gen.base_layers is None:
+                gen.build_base_layers()
             with torch.no_grad():
                 clips = gen.generate_sequence(8, T=T, **seq_kw)
             H, W = gen.H, gen.W
