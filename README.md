@@ -151,10 +151,15 @@ experiments/            # Compression experiments
   fsq.py                # FSQ quantization fine-tuning
   flatten.py            # Flatten/deflatten bottleneck (static)
   flatten_video.py      # Flatten/deflatten bottleneck (temporal)
+  cpu_vae.py            # CPU VAE: convolution-free pipeline
+  cpu_vae_gui.py        # CPU VAE standalone GUI
+  cpu_vae_numpy.py      # Pure NumPy inference (zero PyTorch)
 
 pretrained/             # Pretrained checkpoints
   3ch_S8x.pt            # 3ch RGB, 8x spatial, static
   3ch_S8x_T4x.pt       # 3ch RGB, 8x spatial, 4x temporal
+  ur-ps8-lc9-id8-o1-30k.pt   # CPU VAE: unrolled, 9ch, 30K steps
+  ur-ps8-lc3-id4-o3-10k.pt   # CPU VAE: unrolled, 3ch, 10K steps
 ```
 
 ## Requirements
@@ -163,6 +168,97 @@ pretrained/             # Pretrained checkpoints
 - PyTorch 2.0+ with CUDA
 - ffmpeg (for video preview/inference)
 - PIL/Pillow, numpy
+
+## CPU VAE Experiment
+
+Convolution-free encoder/decoder that runs entirely on CPU. Replaces all Conv2d operations with `Unfold + Linear` projections and learned positional embeddings. Designed as a lightweight encode/decode block for downstream RSSM world models.
+
+### Architecture: UnrolledPatchVAE
+
+Each image patch is unrolled into a pixel line with explicit positional and channel identity embeddings, then compressed via linear projection. No spatial convolutions anywhere.
+
+- **Encode:** `F.unfold` patches + learned (spatial, channel) embeddings + `nn.Linear` projection
+- **Decode:** `nn.Linear` projection + `F.fold` with overlap averaging
+- **Overlap blending:** configurable patch overlap eliminates boundary artifacts
+
+### Pipeline Stages
+
+Agnostic staged pipeline with unified checkpoint format. Every checkpoint is self-contained (fuses all upstream models). Stages chain arbitrarily via `--mode extend`.
+
+| Stage | Type | Function |
+|-------|------|----------|
+| **S1** | UnrolledPatchVAE | Cascadable spatial compression (fresh/resume/extend) |
+| **Refiner** | PatchAttentionRefiner | Transformer self-attention over patch tokens with 2D rotary positional embeddings. Global receptive field for cross-patch refinement |
+| **Refiner** | LatentRefiner | Conv1d residual blocks along walk-ordered 1D sequence (alternative) |
+| **S2** | FlattenDeflatten | Channel compression + 1D serialization via walk order (raster/hilbert/morton) |
+
+### Cascaded Compression
+
+S1 stages cascade with `--mode extend` — each stage halves the spatial grid:
+
+```
+360x640 -> 180x320 -> 90x160 -> 45x80    (3 stages, ps3 o1, 64:1)
+```
+
+Each cascade stage is identical (~4K params) and trains in ~11 minutes on synthetic data.
+
+### Attention Refiner
+
+Transformer self-attention over the latent grid with configurable patchification:
+- Unfolds the latent into overlapping patches for richer per-token features
+- 2D rotary positional embeddings encode spatial position
+- Global receptive field: every token attends to every other
+- Optional selective finetuning of upstream encoders/decoders
+
+Example: `--attn-patch-size 3 --attn-patch-overlap 1` on a 45x80 grid = 858 tokens, 6ms, 21K params.
+
+### CPU Inference Benchmarks
+
+| Config | Latent dims | Params | CPU decode | Compression |
+|--------|-------------|--------|-----------|-------------|
+| 3-stage cascade (ps3 o1 lc3 hd32) | 10,800 | 13K | 27ms | 64:1 |
+| 3-stage + attention refiner | 10,800 | 34K | 33ms | 64:1 |
+| 4-stage cascade | 2,640 | 17K | 28ms | 262:1 |
+| 3-stage + S2 flatten (2ch) | 7,200 | 15K | 28ms | 96:1 |
+
+Pure NumPy inference available (`cpu_vae_numpy.py`) — zero PyTorch dependency, loads from `.npz` files.
+
+### GUI
+
+Standalone Tkinter app (`cpu_vae_gui.bat`) with 4 tabs:
+- **S1 Train** — Fresh/Resume/Extend with architecture controls
+- **Refiner** — Attention or Conv1d with selective encoder/decoder finetuning
+- **S2 Train** — Flatten bottleneck with walk order selection
+- **Inference** — Load any pipeline checkpoint, per-stage latency logging
+
+### Usage
+
+```bash
+# Launch CPU VAE GUI
+cpu_vae_gui.bat
+
+# Train S1 fresh
+python -m experiments.cpu_vae s1 --mode fresh --patch-size 3 --overlap 1 --latent-ch 3 --inner-dim 4 --hidden-dim 32
+
+# Extend with new cascade stage
+python -m experiments.cpu_vae s1 --mode extend --input-ckpt cpu_vae_logs/latest.pt
+
+# Add attention refiner
+python -m experiments.cpu_vae refiner --input-ckpt cpu_vae_logs/latest.pt --refiner-type attention --attn-patch-size 3 --attn-patch-overlap 1
+
+# Flatten for world model
+python -m experiments.cpu_vae s2 --input-ckpt cpu_vae_logs/latest.pt --bottleneck-ch 2 --walk-order hilbert
+
+# Unified inference with timing
+python -m experiments.cpu_vae infer --ckpt cpu_vae_logs/latest.pt
+```
+
+### Pretrained CPU VAE Checkpoints
+
+| Checkpoint | Config | Steps |
+|-----------|--------|-------|
+| `ur-ps8-lc9-id8-o1-30k.pt` | ps8, 9ch latent, inner_dim=8, overlap=1 | 30K |
+| `ur-ps8-lc3-id4-o3-10k.pt` | ps8, 3ch latent, inner_dim=4, overlap=3 | 10K |
 
 ## Acknowledgments
 
