@@ -238,7 +238,7 @@ class UnrolledPatchVAE(nn.Module):
 
     def __init__(self, patch_size=8, overlap=0, image_channels=3,
                  latent_channels=32, inner_dim=64, post_kernel=0,
-                 hidden_dim=0):
+                 hidden_dim=0, decode_context=0):
         super().__init__()
         self.patch_size = patch_size
         self.overlap = overlap
@@ -300,10 +300,19 @@ class UnrolledPatchVAE(nn.Module):
             self.post_enc_mix = None
             self.pre_dec_mix = None
 
-        # Decoder: latent -> position features -> scalar pixel values
+        # Decode context: gather NxN neighborhood of latent values per patch
+        self.decode_context = decode_context
+        if decode_context > 0:
+            # Input to dec_mix is center + neighborhood
+            ctx_size = (2 * decode_context + 1) ** 2  # e.g. context=1 -> 3x3=9
+            dec_input_ch = latent_channels * ctx_size
+        else:
+            dec_input_ch = latent_channels
+
+        # Decoder: latent (+ context) -> position features -> scalar pixel values
         if hidden_dim > 0:
             self.dec_mix = nn.Sequential(
-                nn.Linear(latent_channels, hidden_dim),
+                nn.Linear(dec_input_ch, hidden_dim),
                 nn.GELU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.GELU(),
@@ -311,7 +320,7 @@ class UnrolledPatchVAE(nn.Module):
             )
         else:
             self.dec_mix = nn.Sequential(
-                nn.Linear(latent_channels, self.n_positions),
+                nn.Linear(dec_input_ch, self.n_positions),
                 nn.GELU(),
                 nn.Linear(self.n_positions, self.n_positions),
             )
@@ -438,11 +447,23 @@ class UnrolledPatchVAE(nn.Module):
             flat = latent.reshape(B, C_lat, n_patches)
             latent = (self.pre_dec_mix(flat) + flat).reshape(B, C_lat, pH, pW)
 
-        # (B*P, lat_ch)
-        lat_seq = latent.reshape(B, C_lat, n_patches).permute(0, 2, 1)
-        lat_seq = lat_seq.reshape(B * n_patches, C_lat)
+        # Gather decode context (neighbor latents)
+        if self.decode_context > 0:
+            ctx = self.decode_context
+            # Pad latent grid so border patches have neighbors
+            padded = F.pad(latent, (ctx, ctx, ctx, ctx), mode="replicate")
+            # Unfold to gather (2*ctx+1)x(2*ctx+1) neighborhoods
+            # (B, C_lat * k * k, n_patches)
+            k = 2 * ctx + 1
+            neighborhoods = F.unfold(padded, kernel_size=k, stride=1)
+            # -> (B*P, C_lat * k * k)
+            lat_seq = neighborhoods.permute(0, 2, 1).reshape(B * n_patches, -1)
+        else:
+            # (B*P, lat_ch)
+            lat_seq = latent.reshape(B, C_lat, n_patches).permute(0, 2, 1)
+            lat_seq = lat_seq.reshape(B * n_patches, C_lat)
 
-        # Expand and mix: (B*P, lat_ch) -> (B*P, D, 192) via broadcast
+        # Expand and mix: (B*P, dec_input_ch) -> (B*P, D, n_pos) via broadcast
         unpooled = self.dec_mix(lat_seq.unsqueeze(1).expand(-1, self.inner_dim, -1))
 
         # Add decoder position embeddings
@@ -891,7 +912,7 @@ class PatchAttentionRefiner(nn.Module):
 
 def _make_model(model_type, patch_size=8, overlap=0, image_channels=3,
                 latent_channels=32, hidden_dim=0, inner_dim=64,
-                post_kernel=0):
+                post_kernel=0, decode_context=0):
     """Factory to create PatchVAE or UnrolledPatchVAE from config."""
     if model_type == "unrolled":
         return UnrolledPatchVAE(
@@ -902,6 +923,7 @@ def _make_model(model_type, patch_size=8, overlap=0, image_channels=3,
             inner_dim=inner_dim,
             post_kernel=post_kernel,
             hidden_dim=hidden_dim,
+            decode_context=decode_context,
         )
     else:
         return PatchVAE(
@@ -1084,6 +1106,7 @@ def _load_pipeline(ckpt_path, device, strict=True):
                 hidden_dim=cfg.get("hidden_dim", 0),
                 inner_dim=cfg.get("inner_dim", 64),
                 post_kernel=cfg.get("post_kernel", 0),
+                decode_context=cfg.get("decode_context", 0),
             ).to(device)
             missing, unexpected = model.load_state_dict(sd, strict=strict)
             if missing and not strict:
@@ -1401,6 +1424,7 @@ def train_s1(args):
             hidden_dim=args.hidden_dim,
             inner_dim=args.inner_dim,
             post_kernel=args.post_kernel,
+            decode_context=getattr(args, 'decode_context', 0),
         ).to(device)
 
         active_cfg = {
@@ -1412,6 +1436,7 @@ def train_s1(args):
             "hidden_dim": args.hidden_dim,
             "inner_dim": args.inner_dim,
             "post_kernel": args.post_kernel,
+            "decode_context": getattr(args, 'decode_context', 0),
             "H": args.H,
             "W": args.W,
         }
@@ -2594,6 +2619,8 @@ def main():
                     help="Inner channel width for UnrolledPatchVAE")
     s1.add_argument("--post-kernel", type=int, default=0,
                     help="Cross-patch Conv1d kernel (0=off)")
+    s1.add_argument("--decode-context", type=int, default=0,
+                    help="Neighbor context radius for decode (0=off, 1=3x3, 2=5x5)")
     s1.add_argument("--batch-size", type=int, default=4)
     s1.add_argument("--lr", default="2e-4")
     s1.add_argument("--total-steps", type=int, default=30000)

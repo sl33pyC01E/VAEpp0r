@@ -215,6 +215,8 @@ class S1TrainTab(tk.Frame, PreviewWatcher):
         f, self.overlap_var = make_spin(row1, "Overlap", default=1)
         f.pack(side="left", padx=(0, 10))
         f, self.post_kernel = make_spin(row1, "Post kernel", default=5)
+        f.pack(side="left", padx=(0, 10))
+        f, self.decode_ctx = make_spin(row1, "Dec context", default=0)
         f.pack(side="left")
 
         # Training row
@@ -294,6 +296,7 @@ class S1TrainTab(tk.Frame, PreviewWatcher):
                "--hidden-dim", str(self.hidden_dim_var.get()),
                "--overlap", str(self.overlap_var.get()),
                "--post-kernel", str(self.post_kernel.get()),
+               "--decode-context", str(self.decode_ctx.get()),
                "--lr", self.lr_var.get(),
                "--batch-size", str(self.batch_var.get()),
                "--total-steps", str(self.steps_var.get()),
