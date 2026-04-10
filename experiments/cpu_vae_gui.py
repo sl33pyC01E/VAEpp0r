@@ -234,6 +234,8 @@ class S1TrainTab(tk.Frame, PreviewWatcher):
         f.pack(side="left", padx=(0, 10))
         f, self.w_lpips = make_float(row2, "w_lpips", "0.5")
         f.pack(side="left", padx=(0, 10))
+        f, self.w_boundary = make_float(row2, "w_boundary", "0.0")
+        f.pack(side="left", padx=(0, 10))
         f, self.prec_var = make_float(row2, "Precision", "bf16")
         f.pack(side="left")
 
@@ -303,6 +305,7 @@ class S1TrainTab(tk.Frame, PreviewWatcher):
                "--w-l1", self.w_l1.get(),
                "--w-mse", self.w_mse.get(),
                "--w-lpips", self.w_lpips.get(),
+               "--w-boundary", self.w_boundary.get(),
                "--precision", self.prec_var.get(),
                "--save-every", str(self.save_every.get()),
                "--preview-every", str(self.preview_every.get()),

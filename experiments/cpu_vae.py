@@ -1564,6 +1564,35 @@ def train_s1(args):
         print(f"  Final latent: {lat_ch}x{spatial_sizes[-1][0]}x{spatial_sizes[-1][1]} "
               f"= {lat_ch * spatial_sizes[-1][0] * spatial_sizes[-1][1]} dims")
 
+    # -- Boundary weight mask --
+    w_boundary = getattr(args, 'w_boundary', 0.0)
+    boundary_mask = None
+    if w_boundary > 0:
+        # Build mask from the active model's fold divisor
+        ps = active_model.patch_size
+        stride = active_model.stride
+        H, W = args.H, args.W
+        if mode == "extend":
+            H, W = spatial_sizes[active_stage]
+        pad_h, pad_w = active_model._pad_for_patches(H, W)
+        H_pad, W_pad = H + pad_h, W + pad_w
+        pH, pW = active_model._patch_grid_size(H, W)
+        n_patches = pH * pW
+        ic = active_model.image_channels
+        ones = torch.ones(1, ic * ps * ps, n_patches)
+        divisor = F.fold(ones, output_size=(H_pad, W_pad),
+                         kernel_size=ps, stride=stride)
+        divisor = divisor[:, :, :H, :W]
+        max_cov = divisor.max()
+        # Boundary = pixels with less than max coverage
+        # Weight: 1.0 for interior, 1.0 + w_boundary for boundary
+        mask = torch.ones_like(divisor)
+        mask[divisor < max_cov] = 1.0 + w_boundary
+        boundary_mask = mask.to(device)
+        boundary_pct = (divisor < max_cov).float().mean() * 100
+        print(f"Boundary mask: {boundary_pct:.1f}% boundary pixels, "
+              f"weight={1.0 + w_boundary:.0f}x")
+
     # -- Generator --
     gen = VAEpp0rGenerator(
         height=args.H, width=args.W, device=str(device),
@@ -1711,11 +1740,17 @@ def train_s1(args):
                         recon, latent = active_model(x)
                         total = torch.tensor(0.0, device=device)
                         if args.w_l1 > 0:
-                            l1 = F.l1_loss(recon, target)
+                            if boundary_mask is not None:
+                                l1 = (boundary_mask * (recon - target).abs()).mean()
+                            else:
+                                l1 = F.l1_loss(recon, target)
                             total = total + args.w_l1 * l1
                             losses["l1"] = losses.get("l1", 0) + l1.item() / accum
                         if args.w_mse > 0:
-                            mse = F.mse_loss(recon, target)
+                            if boundary_mask is not None:
+                                mse = (boundary_mask * (recon - target).pow(2)).mean()
+                            else:
+                                mse = F.mse_loss(recon, target)
                             total = total + args.w_mse * mse
                             losses["mse"] = losses.get("mse", 0) + mse.item() / accum
                     else:
@@ -1723,11 +1758,17 @@ def train_s1(args):
                         recon, latent = active_model(x)
                         total = torch.tensor(0.0, device=device)
                         if args.w_l1 > 0:
-                            l1 = F.l1_loss(recon, x)
+                            if boundary_mask is not None:
+                                l1 = (boundary_mask * (recon - x).abs()).mean()
+                            else:
+                                l1 = F.l1_loss(recon, x)
                             total = total + args.w_l1 * l1
                             losses["l1"] = losses.get("l1", 0) + l1.item() / accum
                         if args.w_mse > 0:
-                            mse = F.mse_loss(recon, x)
+                            if boundary_mask is not None:
+                                mse = (boundary_mask * (recon - x).pow(2)).mean()
+                            else:
+                                mse = F.mse_loss(recon, x)
                             total = total + args.w_mse * mse
                             losses["mse"] = losses.get("mse", 0) + mse.item() / accum
 
@@ -2629,6 +2670,9 @@ def main():
     s1.add_argument("--w-mse", type=float, default=0.0,
                     help="MSE reconstruction loss weight (0=off)")
     s1.add_argument("--w-lpips", type=float, default=0.5)
+    s1.add_argument("--w-boundary", type=float, default=0.0,
+                    help="Extra weight on patch boundary pixels (0=off, "
+                         "10-50 recommended)")
     s1.add_argument("--w-latent", type=float, default=1.0,
                     help="Latent loss weight (extend mode)")
     s1.add_argument("--w-pixel", type=float, default=0.5,
