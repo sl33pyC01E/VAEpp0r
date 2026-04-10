@@ -431,12 +431,17 @@ class RefinerTrainTab(tk.Frame, PreviewWatcher):
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG_PANEL, font=FONT_SMALL
                        ).pack(side="left", padx=(0, 10))
-        self.finetune_dec_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(row4, text="Finetune decoder",
-                       variable=self.finetune_dec_var,
-                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
-                       activebackground=BG_PANEL, font=FONT_SMALL
-                       ).pack(side="left")
+        ftf = tk.Frame(row4, bg=BG_PANEL)
+        tk.Label(ftf, text="Finetune", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        self.finetune_var = tk.StringVar(value="none")
+        ft_menu = tk.OptionMenu(ftf, self.finetune_var,
+                                "none", "encoders", "decoders", "all")
+        ft_menu.config(bg=BG_INPUT, fg=FG, font=FONT_SMALL,
+                       activebackground=BG_PANEL, activeforeground=FG,
+                       highlightthickness=0, borderwidth=0)
+        ft_menu.pack(anchor="w")
+        ftf.pack(side="left")
 
         # Preview image
         row5, self.preview_img_var = _make_preview_row(top)
@@ -495,8 +500,9 @@ class RefinerTrainTab(tk.Frame, PreviewWatcher):
             cmd.extend(["--resume", resume])
         if self.fresh_opt_var.get():
             cmd.append("--fresh-opt")
-        if self.finetune_dec_var.get():
-            cmd.append("--finetune-decoder")
+        ft = self.finetune_var.get()
+        if ft != "none":
+            cmd.extend(["--finetune", ft])
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop(self):

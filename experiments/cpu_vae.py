@@ -1912,17 +1912,44 @@ def train_refiner(args):
           f"kernel={refiner_cfg.get('kernel_size', 5)}{hc_str}, "
           f"{refiner.param_count():,} params")
 
-    # Finetune decoder: unfreeze pipeline[-2] (stage before refiner)
-    finetune_decoder = getattr(args, 'finetune_decoder', False)
-    decoder_model = None
-    if finetune_decoder and active_stage >= 1:
-        _, decoder_model, _ = models_list[active_stage - 1]
-        decoder_model.requires_grad_(True)
-        decoder_model.train()
-        dec_params = sum(p.numel() for p in decoder_model.parameters()
-                        if p.requires_grad)
-        print(f"  Finetuning decoder (stage {active_stage - 1}): "
-              f"{dec_params:,} trainable params")
+    # Finetune upstream — selectively unfreeze encode/decode paths
+    ft_mode = getattr(args, 'finetune', 'none')
+    decoder_models = []  # tracks models with unfrozen params for optimizer
+
+    _enc_param_prefixes = ("spatial_embed", "channel_embed", "value_proj", "enc_mix")
+    _dec_param_prefixes = ("dec_spatial_embed", "dec_channel_embed", "dec_mix", "value_out")
+
+    def _unfreeze_encode(model):
+        for name, p in model.named_parameters():
+            if any(name.startswith(pfx) for pfx in _enc_param_prefixes):
+                p.requires_grad_(True)
+
+    def _unfreeze_decode(model):
+        for name, p in model.named_parameters():
+            if any(name.startswith(pfx) for pfx in _dec_param_prefixes):
+                p.requires_grad_(True)
+
+    if ft_mode == "encoders":
+        for i in range(active_stage):
+            _, dm, _ = models_list[i]
+            _unfreeze_encode(dm)
+            decoder_models.append(dm)
+    elif ft_mode == "decoders":
+        for i in range(active_stage):
+            _, dm, _ = models_list[i]
+            _unfreeze_decode(dm)
+            decoder_models.append(dm)
+    elif ft_mode == "all":
+        for i in range(active_stage):
+            _, dm, _ = models_list[i]
+            dm.requires_grad_(True)
+            decoder_models.append(dm)
+
+    if decoder_models:
+        ft_params = sum(sum(p.numel() for p in dm.parameters() if p.requires_grad)
+                        for dm in decoder_models)
+        print(f"  Finetuning ({ft_mode}): {len(decoder_models)} stages, "
+              f"{ft_params:,} trainable params")
 
     # -- Generator --
     gen = VAEpp0rGenerator(
@@ -1934,8 +1961,8 @@ def train_refiner(args):
 
     # -- Optimizer --
     train_params = list(refiner.parameters())
-    if finetune_decoder and decoder_model is not None:
-        train_params += [p for p in decoder_model.parameters() if p.requires_grad]
+    for dm in decoder_models:
+        train_params += [p for p in dm.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(train_params, lr=float(args.lr),
                             weight_decay=0.01)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -2036,9 +2063,11 @@ def train_refiner(args):
             break
 
         refiner.train()
-        if finetune_decoder and decoder_model is not None:
-            decoder_model.train()
+        if decoder_models:
+            for dm in decoder_models:
+                dm.train()
         opt.zero_grad(set_to_none=True)
+        losses = {}
 
         for _ai in range(accum):
             images = gen.generate(args.batch_size)
@@ -2611,8 +2640,10 @@ def main():
     sr.add_argument("--dropout", type=float, default=0.0)
     sr.add_argument("--blur-sigma", type=float, default=0.0,
                     help="Gaussian noise sigma added to input latent (0=off)")
-    sr.add_argument("--finetune-decoder", action="store_true",
-                    help="Jointly finetune the upstream decoder with the refiner")
+    sr.add_argument("--finetune", default="none",
+                    choices=["none", "encoders", "decoders", "all"],
+                    help="none=frozen, encoders=encode paths, "
+                         "decoders=decode paths, all=both")
     sr.add_argument("--batch-size", type=int, default=4)
     sr.add_argument("--lr", default="1e-3")
     sr.add_argument("--total-steps", type=int, default=10000)
