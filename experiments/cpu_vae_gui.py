@@ -400,7 +400,9 @@ class RefinerTrainTab(tk.Frame, PreviewWatcher):
         f.pack(side="left", padx=(0, 10))
         f, self.steps_var = make_spin(row2, "Steps", default=10000)
         f.pack(side="left", padx=(0, 10))
-        f, self.w_pix = make_float(row2, "w_pixel", "1.0")
+        f, self.w_l1 = make_float(row2, "w_l1", "1.0")
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_mse = make_float(row2, "w_mse", "0.0")
         f.pack(side="left", padx=(0, 10))
         f, self.w_reg = make_float(row2, "w_reg", "0.01")
         f.pack(side="left", padx=(0, 10))
@@ -477,7 +479,8 @@ class RefinerTrainTab(tk.Frame, PreviewWatcher):
                "--lr", self.lr_var.get(),
                "--batch-size", str(self.batch_var.get()),
                "--total-steps", str(self.steps_var.get()),
-               "--w-pixel", self.w_pix.get(),
+               "--w-l1", self.w_l1.get(),
+               "--w-mse", self.w_mse.get(),
                "--w-reg", self.w_reg.get(),
                "--blur-sigma", self.blur_sigma.get(),
                "--precision", self.prec_var.get(),

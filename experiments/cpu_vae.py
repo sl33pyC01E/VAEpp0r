@@ -2061,11 +2061,19 @@ def train_refiner(args):
                 pixel_refined = full_decode(lat_refined)
 
                 # Pixel loss: refined decode should match original image
-                pixel_loss = F.mse_loss(pixel_refined, x)
+                pixel_loss = torch.tensor(0.0, device=device)
+                if args.w_l1 > 0:
+                    px_l1 = F.l1_loss(pixel_refined, x)
+                    pixel_loss = pixel_loss + args.w_l1 * px_l1
+                    losses["l1"] = losses.get("l1", 0) + px_l1.item() / accum
+                if args.w_mse > 0:
+                    px_mse = F.mse_loss(pixel_refined, x)
+                    pixel_loss = pixel_loss + args.w_mse * px_mse
+                    losses["mse"] = losses.get("mse", 0) + px_mse.item() / accum
                 # Latent reg: keep refined close to clean (not blurred) latent
-                lat_reg = F.mse_loss(lat_refined, lat)
+                lat_reg = F.l1_loss(lat_refined, lat)
 
-                total = args.w_pixel * pixel_loss + args.w_reg * lat_reg
+                total = pixel_loss + args.w_reg * lat_reg
 
             scaler.scale(total / accum).backward()
             del lat, lat_refined, pixel_refined, images, x
@@ -2608,7 +2616,10 @@ def main():
     sr.add_argument("--batch-size", type=int, default=4)
     sr.add_argument("--lr", default="1e-3")
     sr.add_argument("--total-steps", type=int, default=10000)
-    sr.add_argument("--w-pixel", type=float, default=1.0)
+    sr.add_argument("--w-l1", type=float, default=1.0,
+                    help="L1 pixel loss weight")
+    sr.add_argument("--w-mse", type=float, default=0.0,
+                    help="MSE pixel loss weight (0=off)")
     sr.add_argument("--w-reg", type=float, default=0.01,
                     help="Latent regularization weight")
     sr.add_argument("--precision", default="bf16",
