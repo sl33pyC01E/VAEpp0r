@@ -27,6 +27,76 @@ class Clamp(nn.Module):
     def forward(self, x):
         return torch.tanh(x / 3) * 3
 
+
+class ResidualDownsample(nn.Module):
+    """Stride-2 downsample with non-parametric pixel_unshuffle shortcut (DC-AE style).
+
+    Main path: conv(in_ch, out_ch, stride=2)
+    Shortcut: pixel_unshuffle(2) -> channel average to match out_ch
+    Output: main + shortcut
+    """
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.main = conv(in_channels, out_channels, stride=2, bias=False)
+        # Shortcut: pixel_unshuffle gives in_ch * 4 channels
+        self.group_size = in_channels * 4 // out_channels
+
+    def forward(self, x):
+        main_out = self.main(x)
+        # Pad to even dims for pixel_unshuffle
+        _, _, h, w = x.shape
+        pad_h = h % 2
+        pad_w = w % 2
+        x_padded = F.pad(x, (0, pad_w, 0, pad_h)) if (pad_h or pad_w) else x
+        shortcut = F.pixel_unshuffle(x_padded, 2)
+        # Crop shortcut to match main_out spatial dims
+        shortcut = shortcut[:, :, :main_out.shape[2], :main_out.shape[3]]
+        B, C, H, W = shortcut.shape
+        shortcut = shortcut.view(B, main_out.shape[1], self.group_size, H, W).mean(dim=2)
+        return main_out + shortcut
+
+
+class ResidualUpsampleSave(nn.Module):
+    """Save input for pixel_shuffle shortcut, then apply nn.Upsample(2) (DC-AE style).
+
+    Paired with ResidualUpsampleAdd after the channel-change conv.
+    Keeps TGrow as a separate Sequential layer for temporal walker compatibility.
+    """
+    def __init__(self):
+        super().__init__()
+        self.upsample = nn.Upsample(scale_factor=2)
+        self._saved = None
+        self._ref_count = 0  # track consumers for TGrow expansion
+
+    def forward(self, x):
+        self._saved = x  # save pre-upsample tensor for shortcut
+        self._ref_count = 0
+        return self.upsample(x)
+
+
+class ResidualUpsampleAdd(nn.Module):
+    """Add pixel_shuffle shortcut from paired ResidualUpsampleSave (DC-AE style).
+
+    Takes the output of the channel-change conv and adds the non-parametric
+    pixel_shuffle shortcut computed from the saved pre-upsample input.
+    Handles TGrow batch expansion: if main path batch > saved batch,
+    repeats the shortcut to match (temporal stride).
+    """
+    def __init__(self, in_channels, out_channels, save_module):
+        super().__init__()
+        self.save_module = save_module  # reference to paired Save module
+        self.repeats = out_channels * 4 // in_channels
+
+    def forward(self, x):
+        saved = self.save_module._saved
+        shortcut = saved.repeat_interleave(self.repeats, dim=1)
+        shortcut = F.pixel_shuffle(shortcut, 2)
+        # Handle TGrow batch expansion: saved was (NT, ...), x may be (NT*stride, ...)
+        if x.shape[0] != shortcut.shape[0]:
+            t_stride = x.shape[0] // shortcut.shape[0]
+            shortcut = shortcut.repeat_interleave(t_stride, dim=0)
+        return x + shortcut
+
 class MemBlock(nn.Module):
     def __init__(self, n_in, n_out):
         super().__init__()
@@ -160,6 +230,7 @@ class MiniVAE(nn.Module):
         decoder_channels=(192, 96, 64),
         encoder_time_downscale=(True, True, False),
         decoder_time_upscale=(False, True, True),
+        residual_shortcut=False,
         checkpoint_path=None,
     ):
         super().__init__()
@@ -187,7 +258,10 @@ class MiniVAE(nn.Module):
             prev_ch = ec[i - 1] if i > 0 else ec[0]
             cur_ch = ec[i]
             enc_layers.append(TPool(prev_ch, 2 if encoder_time_downscale[i] else 1))
-            enc_layers.append(conv(prev_ch, cur_ch, stride=2, bias=False))
+            if residual_shortcut:
+                enc_layers.append(ResidualDownsample(prev_ch, cur_ch))
+            else:
+                enc_layers.append(conv(prev_ch, cur_ch, stride=2, bias=False))
             enc_layers.extend([
                 MemBlock(cur_ch, cur_ch),
                 MemBlock(cur_ch, cur_ch),
@@ -200,17 +274,22 @@ class MiniVAE(nn.Module):
         n_f = list(decoder_channels)
         dec_layers = [Clamp(), conv(latent_channels, n_f[0]), nn.ReLU(inplace=True)]
         for i in range(n_stages):
+            out_ch = n_f[i + 1] if i < n_stages - 1 else n_f[i]
             dec_layers.extend([
                 MemBlock(n_f[i], n_f[i]),
                 MemBlock(n_f[i], n_f[i]),
                 MemBlock(n_f[i], n_f[i]),
-                nn.Upsample(scale_factor=2),
-                TGrow(n_f[i], 2 if decoder_time_upscale[i] else 1),
             ])
-            if i < n_stages - 1:
-                dec_layers.append(conv(n_f[i], n_f[i + 1], bias=False))
+            if residual_shortcut:
+                save_mod = ResidualUpsampleSave()
+                dec_layers.append(save_mod)
+                dec_layers.append(TGrow(n_f[i], 2 if decoder_time_upscale[i] else 1))
+                dec_layers.append(conv(n_f[i], out_ch, bias=False))
+                dec_layers.append(ResidualUpsampleAdd(n_f[i], out_ch, save_mod))
             else:
-                dec_layers.append(conv(n_f[i], n_f[i], bias=False))
+                dec_layers.append(nn.Upsample(scale_factor=2))
+                dec_layers.append(TGrow(n_f[i], 2 if decoder_time_upscale[i] else 1))
+                dec_layers.append(conv(n_f[i], out_ch, bias=False))
         dec_layers.extend([nn.ReLU(inplace=True), conv(n_f[-1], output_channels)])
         self.decoder = nn.Sequential(*dec_layers)
 

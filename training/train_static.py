@@ -59,6 +59,20 @@ def haar_up(x):
     return out
 
 
+def haar_down_n(x, n):
+    """Apply haar_down n times. 0=identity, 1=2x, 2=4x."""
+    for _ in range(n):
+        x = haar_down(x)
+    return x
+
+
+def haar_up_n(x, n):
+    """Apply haar_up n times. 0=identity, 1=2x, 2=4x."""
+    for _ in range(n):
+        x = haar_up(x)
+    return x
+
+
 # -- Preview -------------------------------------------------------------------
 
 def _load_preview_image(path, H, W, device):
@@ -72,7 +86,7 @@ def _load_preview_image(path, H, W, device):
 
 @torch.no_grad()
 def save_preview(model, gen, logdir, step, device, amp_dtype,
-                 preview_image=None, use_haar=False):
+                 preview_image=None, haar_rounds=0):
     """Save GT | Recon grid as PNG with optional reference image."""
     try:
         model.eval()
@@ -85,20 +99,18 @@ def save_preview(model, gen, logdir, step, device, amp_dtype,
         if preview_image and os.path.exists(preview_image):
             ref = _load_preview_image(preview_image, H, W, device)
             with torch.amp.autocast("cuda", dtype=amp_dtype):
-                if use_haar:
-                    ref_haar = haar_down(ref[:, 0])  # (1, 12, H/2, W/2)
+                if haar_rounds > 0:
+                    ref_haar = haar_down_n(ref[:, 0], haar_rounds)
                     ref_haar_5d = ref_haar.unsqueeze(1)
                     ref_recon, _ = model(ref_haar_5d)
-                    ref_recon_haar = ref_recon[:, -1, :, :H//2, :W//2]
-                    ref_recon_rgb = haar_up(ref_recon_haar)
+                    hH, hW = H // (2 ** haar_rounds), W // (2 ** haar_rounds)
+                    ref_recon_haar = ref_recon[:, -1, :, :hH, :hW]
+                    ref_recon_rgb = haar_up_n(ref_recon_haar, haar_rounds)
                 else:
                     ref_recon, _ = model(ref)
                     ref_recon_rgb = ref_recon[:, -1:].squeeze(1)
             ref_gt = ref[0, 0, :3].cpu().numpy().transpose(1, 2, 0)
-            if use_haar:
-                ref_rc = ref_recon_rgb[0, :3, :H, :W].clamp(0, 1).float().cpu().numpy().transpose(1, 2, 0)
-            else:
-                ref_rc = ref_recon_rgb[0, :3, :H, :W].clamp(0, 1).float().cpu().numpy().transpose(1, 2, 0)
+            ref_rc = ref_recon_rgb[0, :3, :H, :W].clamp(0, 1).float().cpu().numpy().transpose(1, 2, 0)
             ref_gt = (ref_gt * 255).clip(0, 255).astype(np.uint8)
             ref_rc = (ref_rc * 255).clip(0, 255).astype(np.uint8)
             sep_v = np.full((H, 4, 3), 14, dtype=np.uint8)
@@ -109,11 +121,12 @@ def save_preview(model, gen, logdir, step, device, amp_dtype,
         images = gen.generate(8)
 
         with torch.amp.autocast("cuda", dtype=amp_dtype):
-            if use_haar:
-                x_haar = haar_down(images).unsqueeze(1)
+            if haar_rounds > 0:
+                x_haar = haar_down_n(images, haar_rounds).unsqueeze(1)
                 recon, _ = model(x_haar)
-                recon_haar = recon[:, -1, :, :H//2, :W//2]
-                recon_rgb = haar_up(recon_haar)
+                hH, hW = H // (2 ** haar_rounds), W // (2 ** haar_rounds)
+                recon_haar = recon[:, -1, :, :hH, :hW]
+                recon_rgb = haar_up_n(recon_haar, haar_rounds)
             else:
                 x = images.unsqueeze(1).to(device)
                 recon, _ = model(x)
@@ -122,7 +135,7 @@ def save_preview(model, gen, logdir, step, device, amp_dtype,
         rc = recon_rgb[:, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
         gt = images.cpu().numpy()
 
-        del recon, x
+        del recon
 
         cols, rows = 4, 2
         sep = 4
@@ -216,10 +229,18 @@ def train(args):
     else:
         enc_ch = int(enc_ch_str)
     n_stages = len(dec_ch)
-    use_haar = getattr(args, 'haar', False)
-    if use_haar:
-        vae_in_ch = args.image_ch * 4  # 3ch -> 12ch after Haar
-        print(f"Haar mode: {args.image_ch}ch -> {vae_in_ch}ch (2x spatial pre-compression)")
+    haar_mode = getattr(args, 'haar', 'none')
+    # Backward compat: old checkpoints stored haar as bool
+    if haar_mode is True:
+        haar_mode = '2x'
+    elif haar_mode is False or haar_mode is None:
+        haar_mode = 'none'
+    haar_rounds = {'none': 0, '2x': 1, '4x': 2}[haar_mode]
+    haar_ch_mult = 4 ** haar_rounds  # 1, 4, or 16
+    haar_spatial_mult = 2 ** haar_rounds  # 1, 2, or 4
+    if haar_rounds > 0:
+        vae_in_ch = args.image_ch * haar_ch_mult
+        print(f"Haar {haar_mode}: {args.image_ch}ch -> {vae_in_ch}ch ({haar_spatial_mult}x spatial pre-compression)")
     else:
         vae_in_ch = args.image_ch
     model = MiniVAE(
@@ -230,12 +251,13 @@ def train(args):
         decoder_channels=dec_ch,
         encoder_time_downscale=tuple([False] * n_stages),
         decoder_time_upscale=tuple([False] * n_stages),
+        residual_shortcut=getattr(args, 'residual_shortcut', False),
     ).to(device)
     if args.grad_checkpoint:
         model.use_checkpoint = True
     pc = model.param_count()
     mb = sum(p.numel() * 4 for p in model.parameters()) / 1024 / 1024
-    spatial = 2 ** n_stages * (2 if use_haar else 1)
+    spatial = 2 ** n_stages * haar_spatial_mult
     print(f"MiniVAE ({vae_in_ch}ch in, {latent_ch}ch latent, "
           f"{spatial}x spatial): {pc['total']:,} params, {mb:.1f}MB"
           f"{', grad-checkpoint' if args.grad_checkpoint else ''}")
@@ -337,7 +359,7 @@ def train(args):
     def _ckpt_name(step):
         ec_str = ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else str(enc_ch)
         dc_str = ",".join(str(x) for x in dec_ch)
-        haar_str = "-haar" if use_haar else ""
+        haar_str = f"-haar{haar_mode}" if haar_rounds > 0 else ""
         steps_k = f"{step // 1000}k" if step >= 1000 else str(step)
         return f"vae-{args.image_ch}ch-lc{latent_ch}-ec{ec_str}-dc{dc_str}-{spatial}x{haar_str}-{steps_k}.pt"
 
@@ -354,7 +376,7 @@ def train(args):
                 "output_channels": args.image_ch,
                 "encoder_channels": ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else enc_ch,
                 "decoder_channels": ",".join(str(x) for x in dec_ch),
-                "haar": use_haar,
+                "haar": haar_mode,
                 "synthyper": True,
             },
         }
@@ -362,7 +384,7 @@ def train(args):
     # -- Initial preview --
     preview_image = getattr(args, 'preview_image', None)
     save_preview(model, gen, str(logdir), global_step, device, amp_dtype,
-                 preview_image=preview_image, use_haar=use_haar)
+                 preview_image=preview_image, haar_rounds=haar_rounds)
 
     # -- Loop --
     t0 = time.time()
@@ -395,10 +417,9 @@ def train(args):
                 images = torch.cat(chunks)
             else:
                 images = gen.generate(args.batch_size)  # (B, 3, H, W)
-            if use_haar:
-                # Haar: (B, 3, H, W) -> (B, 12, H/2, W/2)
-                haar_input = haar_down(images)  # (B, 12, H/2, W/2)
-                x = haar_input.unsqueeze(1)  # (B, 1, 12, H/2, W/2)
+            if haar_rounds > 0:
+                haar_input = haar_down_n(images, haar_rounds)
+                x = haar_input.unsqueeze(1)
             else:
                 x = images.unsqueeze(1)  # (B, 1, 3, H, W)
 
@@ -411,8 +432,10 @@ def train(args):
                 gt = x[:, T_in - T_match:]
                 rc = recon[:, T_out - T_match:]
                 # Crop to input spatial size (model may pad for divisibility)
-                if use_haar:
-                    rc = rc[:, :, :, :args.H // 2, :args.W // 2]
+                if haar_rounds > 0:
+                    hH = args.H // (2 ** haar_rounds)
+                    hW = args.W // (2 ** haar_rounds)
+                    rc = rc[:, :, :, :hH, :hW]
                 else:
                     rc = rc[:, :, :, :args.H, :args.W]
 
@@ -428,8 +451,10 @@ def train(args):
 
                 if lpips_fn is not None:
                     BT = rc.shape[0] * T_match
-                    rc_lp = rc[:, :, :3].reshape(BT, 3, args.H, args.W) * 2 - 1
-                    gt_lp = gt[:, :, :3].reshape(BT, 3, args.H, args.W) * 2 - 1
+                    lpH = rc.shape[3]
+                    lpW = rc.shape[4]
+                    rc_lp = rc[:, :, :3].reshape(BT, 3, lpH, lpW) * 2 - 1
+                    gt_lp = gt[:, :, :3].reshape(BT, 3, lpH, lpW) * 2 - 1
                     lp = lpips_fn(rc_lp, gt_lp).mean()
                     total = total + args.w_lpips * lp
                     losses["lpips"] = losses.get("lpips", 0) + lp.item() / accum
@@ -466,7 +491,7 @@ def train(args):
         if global_step % args.preview_every == 0:
             save_preview(model, gen, str(logdir), global_step,
                          device, amp_dtype, preview_image=preview_image,
-                         use_haar=use_haar)
+                         haar_rounds=haar_rounds)
 
         # -- Checkpoint --
         if global_step % args.save_every == 0:
@@ -525,8 +550,11 @@ def main():
                         "Lower to reduce generator VRAM.")
     p.add_argument("--grad-checkpoint", action="store_true",
                    help="Gradient checkpointing (trade compute for memory)")
-    p.add_argument("--haar", action="store_true",
-                   help="Haar wavelet 2x pre-compression (3ch->12ch, doubles spatial)")
+    p.add_argument("--haar", default="none", choices=["none", "2x", "4x"],
+                   help="Haar wavelet pre-compression (none/2x/4x). "
+                        "2x: 3ch->12ch at half res. 4x: 3ch->48ch at quarter res.")
+    p.add_argument("--residual-shortcut", action="store_true",
+                   help="DC-AE style residual shortcuts (pixel_unshuffle/shuffle bypasses)")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode (25%% pattern / 25%% collage / "
                         "25%% dense random / 25%% structured)")

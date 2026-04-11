@@ -223,6 +223,7 @@ def train(args):
         decoder_channels=dec_ch,
         encoder_time_downscale=enc_t,
         decoder_time_upscale=dec_t,
+        residual_shortcut=getattr(args, 'residual_shortcut', False),
     ).to(device)
     if args.grad_checkpoint:
         model.use_checkpoint = True
@@ -552,6 +553,8 @@ def main():
                    help="Gradient checkpointing (trade compute for memory)")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode")
+    p.add_argument("--residual-shortcut", action="store_true",
+                   help="DC-AE style residual shortcuts (pixel_unshuffle/shuffle bypasses)")
     p.add_argument("--resume", default=None)
     p.add_argument("--fresh-opt", action="store_true")
     p.add_argument("--logdir", default="synthyper_video_logs")

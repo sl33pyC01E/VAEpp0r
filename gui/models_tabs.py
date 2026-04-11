@@ -30,12 +30,22 @@ class TrainingTab(tk.Frame):
         arch_row = tk.Frame(top, bg=BG_PANEL)
         arch_row.pack(fill="x", pady=(10, 0))
         self._presets = {
-            "Pico (3ch, 1M, 4MB)":    {"image_ch": 3, "latent_ch": 4,  "enc_ch": 32, "dec_ch": "64,32,16"},
-            "Nano (3ch, 1.2M, 5MB)":  {"image_ch": 3, "latent_ch": 8,  "enc_ch": 32, "dec_ch": "64,48,32"},
-            "Tiny (3ch, 3.3M, 13MB)": {"image_ch": 3, "latent_ch": 16, "enc_ch": 48, "dec_ch": "128,64,32"},
-            "Small (3ch, 4M, 16MB)":  {"image_ch": 3, "latent_ch": 16, "enc_ch": 64, "dec_ch": "128,64,48"},
-            "Medium (3ch, 11M, 43MB)":{"image_ch": 3, "latent_ch": 32, "enc_ch": 64, "dec_ch": "256,128,64"},
-            "Custom":                  None,
+            "Pico (3ch, 1M, 4MB)":     {"image_ch": 3, "latent_ch": 4,  "enc_ch": "32",  "dec_ch": "64,32,16",         "haar": "none", "shortcut": False},
+            "Nano (3ch, 1.2M, 5MB)":   {"image_ch": 3, "latent_ch": 8,  "enc_ch": "32",  "dec_ch": "64,48,32",         "haar": "none", "shortcut": False},
+            "Tiny (3ch, 3.3M, 13MB)":  {"image_ch": 3, "latent_ch": 16, "enc_ch": "48",  "dec_ch": "128,64,32",        "haar": "none", "shortcut": False},
+            "Small (3ch, 4M, 16MB)":   {"image_ch": 3, "latent_ch": 16, "enc_ch": "64",  "dec_ch": "128,64,48",        "haar": "none", "shortcut": False},
+            "Medium (3ch, 11M, 43MB)": {"image_ch": 3, "latent_ch": 32, "enc_ch": "64",  "dec_ch": "256,128,64",       "haar": "none", "shortcut": False},
+            "16x DC (4ch, 79M)":       {"image_ch": 3, "latent_ch": 4,  "enc_ch": "64,128,256,512", "dec_ch": "512,256,128,64", "haar": "none", "shortcut": True},
+            "32x DC (16ch, 95M)":      {"image_ch": 3, "latent_ch": 16, "enc_ch": "64,128,256,256,512", "dec_ch": "512,256,256,128,64", "haar": "none", "shortcut": True},
+            "32x H2 DC (16ch, 79M)":   {"image_ch": 3, "latent_ch": 16, "enc_ch": "64,128,256,512", "dec_ch": "512,256,128,64", "haar": "2x", "shortcut": True},
+            "32x H4 DC (16ch, 20M)":   {"image_ch": 3, "latent_ch": 16, "enc_ch": "64,128,256", "dec_ch": "256,128,64", "haar": "4x", "shortcut": True},
+            "64x DC (64ch, 157M)":     {"image_ch": 3, "latent_ch": 64, "enc_ch": "64,128,256,256,512,512", "dec_ch": "512,512,256,256,128,64", "haar": "none", "shortcut": True},
+            "64x H2 DC (64ch, 95M)":   {"image_ch": 3, "latent_ch": 64, "enc_ch": "64,128,256,256,512", "dec_ch": "512,256,256,128,64", "haar": "2x", "shortcut": True},
+            "64x H4 DC (64ch, 80M)":   {"image_ch": 3, "latent_ch": 64, "enc_ch": "64,128,256,512", "dec_ch": "512,256,128,64", "haar": "4x", "shortcut": True},
+            "128x DC (256ch, 220M)":   {"image_ch": 3, "latent_ch": 256,"enc_ch": "64,128,256,256,512,512,512", "dec_ch": "512,512,512,256,256,128,64", "haar": "none", "shortcut": True},
+            "128x H2 DC (256ch, 159M)":{"image_ch": 3, "latent_ch": 256,"enc_ch": "64,128,256,256,512,512", "dec_ch": "512,512,256,256,128,64", "haar": "2x", "shortcut": True},
+            "128x H4 DC (256ch, 97M)": {"image_ch": 3, "latent_ch": 256,"enc_ch": "64,128,256,256,512", "dec_ch": "512,256,256,128,64", "haar": "4x", "shortcut": True},
+            "Custom":                   None,
         }
         tk.Label(arch_row, text="Preset", bg=BG_PANEL, fg=FG_DIM,
                  font=FONT_SMALL).pack(side="left", padx=(0, 5))
@@ -138,8 +148,16 @@ class TrainingTab(tk.Frame):
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG_PANEL, activeforeground=FG,
                        font=FONT_SMALL).pack(side="left", padx=(0, 10))
-        self.haar_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(btn_row, text="Haar 2x", variable=self.haar_var,
+        tk.Label(btn_row, text="Haar:", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(side="left")
+        self.haar_var = tk.StringVar(value="none")
+        haar_menu = tk.OptionMenu(btn_row, self.haar_var, "none", "2x", "4x")
+        haar_menu.config(bg=BG_INPUT, fg=FG, font=FONT_SMALL,
+                         activebackground=BG_PANEL, activeforeground=FG,
+                         highlightthickness=0, borderwidth=0, width=4)
+        haar_menu.pack(side="left", padx=(0, 10))
+        self.residual_shortcut_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(btn_row, text="DC-AE Shortcut", variable=self.residual_shortcut_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG_PANEL, activeforeground=FG,
                        font=FONT_SMALL).pack(side="left")
@@ -166,6 +184,8 @@ class TrainingTab(tk.Frame):
         self.latent_var.set(cfg["latent_ch"])
         self.enc_ch_var.set(str(cfg["enc_ch"]))
         self.dec_ch_var.set(cfg["dec_ch"])
+        self.haar_var.set(cfg.get("haar", "none"))
+        self.residual_shortcut_var.set(cfg.get("shortcut", False))
 
     def start(self):
         cmd = [VENV_PYTHON, "-m", "training.train_static",
@@ -194,8 +214,11 @@ class TrainingTab(tk.Frame):
             cmd += ["--resume", resume]
         if self.disco_var.get():
             cmd.append("--disco")
-        if self.haar_var.get():
-            cmd.append("--haar")
+        haar = self.haar_var.get()
+        if haar != "none":
+            cmd += ["--haar", haar]
+        if self.residual_shortcut_var.get():
+            cmd.append("--residual-shortcut")
         prev_img = self.preview_img_var.get().strip()
         if prev_img:
             cmd += ["--preview-image", prev_img]
@@ -762,6 +785,11 @@ class VideoTrainTab(tk.Frame):
         tk.Checkbutton(btn_row, text="Disco Quadrant", variable=self.disco_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG_PANEL, activeforeground=FG,
+                       font=FONT_SMALL).pack(side="left", padx=(0, 10))
+        self.residual_shortcut_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(btn_row, text="DC-AE Shortcut", variable=self.residual_shortcut_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, activeforeground=FG,
                        font=FONT_SMALL).pack(side="left")
 
         # Preview
@@ -811,6 +839,8 @@ class VideoTrainTab(tk.Frame):
             cmd += ["--fresh-opt"]
         if self.disco_var.get():
             cmd.append("--disco")
+        if self.residual_shortcut_var.get():
+            cmd.append("--residual-shortcut")
         prev_vid = self.preview_vid_var.get().strip()
         if prev_vid:
             cmd += ["--preview-image", prev_vid,
