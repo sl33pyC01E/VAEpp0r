@@ -105,6 +105,8 @@ class SRVAETab(tk.Frame):
         f.pack(side="left", padx=(0, 10))
         f, self.preview_every = make_spin(row3, "Preview every", default=100)
         f.pack(side="left", padx=(0, 10))
+        f, self.freeze_up = make_spin(row3, "Freeze up steps", default=0)
+        f.pack(side="left", padx=(0, 10))
         f, self.resume_var = make_float(row3, "Resume", "", width=30)
         f.pack(side="left")
 
@@ -163,6 +165,7 @@ class SRVAETab(tk.Frame):
                "--w-mse", self.w_mse.get(),
                "--w-lpips", self.w_lpips.get(),
                "--precision", self.prec_var.get(),
+               "--freeze-up-steps", str(self.freeze_up.get()),
                "--save-every", str(self.save_every.get()),
                "--preview-every", str(self.preview_every.get())]
         resume = self.resume_var.get().strip()

@@ -374,9 +374,15 @@ def train(args):
         except ImportError:
             print("WARNING: pip install lpips")
 
+    # -- Freeze upscaler during warmup --
+    freeze_up_steps = getattr(args, 'freeze_up_steps', 0)
+    if freeze_up_steps > 0:
+        model.upscaler.requires_grad_(False)
+        print(f"Upscaler frozen for first {freeze_up_steps} steps (downscaler warmup)")
+
     # -- Optimizer --
-    opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr),
-                            weight_decay=0.01)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
+                            lr=float(args.lr), weight_decay=0.01)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=args.total_steps, eta_min=float(args.lr) * 0.01)
 
@@ -431,6 +437,17 @@ def train(args):
             if stop_file.exists():
                 stop_file.unlink()
             break
+
+        # Unfreeze upscaler after warmup
+        if freeze_up_steps > 0 and global_step == freeze_up_steps:
+            model.upscaler.requires_grad_(True)
+            # Rebuild optimizer with all params
+            opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr),
+                                    weight_decay=0.01)
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt, T_max=args.total_steps - global_step,
+                eta_min=float(args.lr) * 0.01)
+            print(f"[step {global_step}] Upscaler unfrozen, optimizer rebuilt")
 
         model.train()
         opt.zero_grad(set_to_none=True)
@@ -524,6 +541,8 @@ def main():
                    choices=["fp16", "bf16", "fp32"])
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
+    p.add_argument("--freeze-up-steps", type=int, default=0,
+                   help="Freeze upscaler for N steps (learned downscaler warmup)")
     p.add_argument("--resume", default=None)
     p.add_argument("--logdir", default="sr_vae_logs")
     p.add_argument("--log-every", type=int, default=1)
