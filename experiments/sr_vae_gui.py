@@ -107,6 +107,10 @@ class SRVAETab(tk.Frame):
         f.pack(side="left", padx=(0, 10))
         f, self.freeze_up = make_spin(row3, "Freeze up steps", default=0)
         f.pack(side="left", padx=(0, 10))
+        f, self.w_warmup_lnz = make_float(row3, "w_wu_lnz", "1.0")
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_warmup_rec = make_float(row3, "w_wu_rec", "0.5")
+        f.pack(side="left", padx=(0, 10))
         f, self.resume_var = make_float(row3, "Resume", "", width=20)
         f.pack(side="left", padx=(0, 10))
         f, self.load_down_var = make_float(row3, "Load down", "", width=20)
@@ -170,6 +174,8 @@ class SRVAETab(tk.Frame):
                "--w-lpips", self.w_lpips.get(),
                "--precision", self.prec_var.get(),
                "--freeze-up-steps", str(self.freeze_up.get()),
+               "--w-warmup-lanczos", self.w_warmup_lnz.get(),
+               "--w-warmup-recon", self.w_warmup_rec.get(),
                "--save-every", str(self.save_every.get()),
                "--preview-every", str(self.preview_every.get())]
         resume = self.resume_var.get().strip()

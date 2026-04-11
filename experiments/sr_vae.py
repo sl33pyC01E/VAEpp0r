@@ -485,13 +485,22 @@ def train(args):
 
             total = torch.tensor(0.0, device=device)
 
-            # Lanczos warmup: train downscaler to match lanczos output
+            # Warmup: train downscaler with lanczos target + frozen upscaler recon
             if lanczos_target is not None and global_step < freeze_up_steps:
                 with torch.no_grad():
                     lanczos_out = lanczos_target(x)
                 down_loss = F.l1_loss(z, lanczos_out)
-                total = total + down_loss
-                losses["down"] = down_loss.item()
+                total = total + args.w_warmup_lanczos * down_loss
+                losses["lnz"] = down_loss.item()
+
+                # Frozen upscaler alignment: does the thumbnail reconstruct well?
+                # Upscaler weights are frozen but gradients flow through to z
+                if args.w_warmup_recon > 0:
+                    warmup_recon = model.upscaler(z)
+                    warmup_recon = warmup_recon[:, :, :x.shape[2], :x.shape[3]]
+                    recon_loss = F.l1_loss(warmup_recon, x)
+                    total = total + args.w_warmup_recon * recon_loss
+                    losses["wrec"] = recon_loss.item()
             else:
                 # Normal end-to-end losses
                 if args.w_l1 > 0:
@@ -578,6 +587,10 @@ def main():
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--freeze-up-steps", type=int, default=0,
                    help="Freeze upscaler for N steps (learned downscaler warmup)")
+    p.add_argument("--w-warmup-lanczos", type=float, default=1.0,
+                   help="Lanczos target loss weight during warmup")
+    p.add_argument("--w-warmup-recon", type=float, default=0.5,
+                   help="Frozen upscaler recon loss weight during warmup (0=off)")
     p.add_argument("--resume", default=None)
     p.add_argument("--load-downscaler", default=None,
                    help="Load downscaler weights independently")
