@@ -1113,5 +1113,195 @@ class VideoInferenceTab(tk.Frame):
         self.after(33, self._play_video_loop, self._play_gen)
 
 
+class FusionTrainTab(tk.Frame):
+    """CPU VAE + MiniVAE fusion training tab."""
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._preview_photo = None
+        self._last_mtime = 0
+        self.build()
+
+    def build(self):
+        top = tk.Frame(self, bg=BG_PANEL, padx=10, pady=10)
+        top.pack(fill="x", padx=5, pady=5)
+
+        tk.Label(top, text="Fusion Training (CPU VAE + MiniVAE)", bg=BG_PANEL,
+                 fg=FG, font=FONT_TITLE).pack(anchor="w")
+        tk.Label(top, text="Frozen CPU VAE preprocessor → MiniVAE compression",
+                 bg=BG_PANEL, fg=FG_DIM, font=FONT_SMALL).pack(anchor="w",
+                                                                 pady=(2, 10))
+
+        # CPU VAE checkpoint
+        cpu_row = tk.Frame(top, bg=BG_PANEL)
+        cpu_row.pack(fill="x", pady=(5, 0))
+        f, self.cpu_ckpt_var = make_float(cpu_row, "CPU VAE checkpoint",
+            os.path.join(PROJECT_ROOT, "cpu_vae_logs", "latest.pt"), width=50)
+        f.pack(side="left", fill="x", expand=True)
+
+        # MiniVAE architecture
+        arch_row = tk.Frame(top, bg=BG_PANEL)
+        arch_row.pack(fill="x", pady=(5, 0))
+        f, self.latent_var = make_spin(arch_row, "Latent ch", default=4)
+        f.pack(side="left", padx=(0, 10))
+        f, self.enc_ch_var = make_float(arch_row, "Enc ch", "64", width=12)
+        f.pack(side="left", padx=(0, 10))
+        f, self.dec_ch_var = make_float(arch_row, "Dec ch", "256,128,64", width=14)
+        f.pack(side="left")
+
+        # Training params
+        row1 = tk.Frame(top, bg=BG_PANEL)
+        row1.pack(fill="x", pady=(5, 0))
+        f, self.lr_var = make_float(row1, "LR", "2e-4")
+        f.pack(side="left", padx=(0, 10))
+        f, self.batch_var = make_spin(row1, "Batch", default=4)
+        f.pack(side="left", padx=(0, 10))
+        f, self.steps_var = make_spin(row1, "Total steps", default=30000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.prec_var = make_float(row1, "Precision", "bf16")
+        f.pack(side="left")
+
+        # Loss weights
+        row2 = tk.Frame(top, bg=BG_PANEL)
+        row2.pack(fill="x", pady=(5, 0))
+        f, self.w_l1_var = make_float(row2, "w_l1", "1.0")
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_mse_var = make_float(row2, "w_mse", "0.0")
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_pixel_var = make_float(row2, "w_pixel", "0.5")
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_lpips_var = make_float(row2, "w_lpips", "0.0")
+        f.pack(side="left")
+
+        # Save/log
+        row3 = tk.Frame(top, bg=BG_PANEL)
+        row3.pack(fill="x", pady=(5, 0))
+        f, self.save_every_var = make_spin(row3, "Save every", default=5000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.preview_every_var = make_spin(row3, "Preview every", default=100)
+        f.pack(side="left", padx=(0, 10))
+        f, self.logdir_var = make_float(row3, "Log dir", "fusion_logs")
+        f.pack(side="left", padx=(0, 10))
+        f, self.resume_var = make_float(row3, "Resume", "")
+        f.pack(side="left")
+
+        # Options
+        row4 = tk.Frame(top, bg=BG_PANEL)
+        row4.pack(fill="x", pady=(5, 0))
+        self.disco_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(row4, text="Disco Quadrant", variable=self.disco_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, font=FONT_SMALL
+                       ).pack(side="left", padx=(0, 10))
+        self.fresh_opt_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row4, text="Fresh opt", variable=self.fresh_opt_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, font=FONT_SMALL
+                       ).pack(side="left", padx=(0, 10))
+        self.grad_ckpt_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row4, text="Grad checkpoint", variable=self.grad_ckpt_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, font=FONT_SMALL
+                       ).pack(side="left")
+
+        # Preview image
+        prev_row = tk.Frame(top, bg=BG_PANEL)
+        prev_row.pack(fill="x", pady=(5, 0))
+        self.preview_img_var = tk.StringVar(value="")
+        f = tk.Frame(prev_row, bg=BG_PANEL)
+        tk.Label(f, text="Preview image", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        ef = tk.Frame(f, bg=BG_PANEL)
+        tk.Entry(ef, textvariable=self.preview_img_var, bg=BG_INPUT, fg=FG,
+                 font=FONT, width=45, borderwidth=0,
+                 insertbackground=FG).pack(side="left", fill="x", expand=True)
+        from tkinter import filedialog
+        make_btn(ef, "Browse",
+                 lambda: self.preview_img_var.set(
+                     filedialog.askopenfilename(
+                         filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.webp"),
+                                    ("All", "*.*")]) or self.preview_img_var.get()),
+                 ACCENT, width=7).pack(side="left", padx=(5, 0))
+        ef.pack(fill="x")
+        f.pack(side="left", fill="x", expand=True)
+
+        # Buttons
+        btn_row = tk.Frame(top, bg=BG_PANEL)
+        btn_row.pack(fill="x", pady=(10, 0))
+        make_btn(btn_row, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
+        make_btn(btn_row, "Stop (save)", self.stop_save, BLUE).pack(side="left", padx=(0, 5))
+        make_btn(btn_row, "Kill", self.kill, RED).pack(side="left")
+
+        # Preview
+        self.preview_label = tk.Label(self, bg=BG)
+        self.preview_label.pack(pady=5)
+
+        # Log
+        self.log = make_log(self)
+        self.log.pack(fill="both", expand=True, padx=5, pady=5)
+        self.runner = ProcRunner(self.log)
+
+        self._check_preview()
+
+    def start(self):
+        cmd = [VENV_PYTHON, "-m", "training.train_fusion",
+               "--cpu-vae-ckpt", self.cpu_ckpt_var.get(),
+               "--latent-ch", str(self.latent_var.get()),
+               "--enc-ch", self.enc_ch_var.get(),
+               "--dec-ch", self.dec_ch_var.get(),
+               "--lr", self.lr_var.get(),
+               "--batch-size", str(self.batch_var.get()),
+               "--total-steps", str(self.steps_var.get()),
+               "--precision", self.prec_var.get(),
+               "--w-l1", self.w_l1_var.get(),
+               "--w-mse", self.w_mse_var.get(),
+               "--w-pixel", self.w_pixel_var.get(),
+               "--w-lpips", self.w_lpips_var.get(),
+               "--save-every", str(self.save_every_var.get()),
+               "--preview-every", str(self.preview_every_var.get()),
+               "--logdir", self.logdir_var.get()]
+        resume = self.resume_var.get().strip()
+        if resume:
+            cmd += ["--resume", resume]
+        if self.disco_var.get():
+            cmd.append("--disco")
+        if self.fresh_opt_var.get():
+            cmd.append("--fresh-opt")
+        if self.grad_ckpt_var.get():
+            cmd.append("--grad-checkpoint")
+        prev_img = self.preview_img_var.get().strip()
+        if prev_img:
+            cmd += ["--preview-image", prev_img]
+        self.runner.run(cmd, cwd=PROJECT_ROOT)
+
+    def stop_save(self):
+        logdir = os.path.join(PROJECT_ROOT, self.logdir_var.get())
+        os.makedirs(logdir, exist_ok=True)
+        Path(os.path.join(logdir, ".stop")).touch()
+        self.runner._append("[Stop file written]\n")
+
+    def kill(self):
+        self.runner.kill()
+
+    def _check_preview(self):
+        logdir = os.path.join(PROJECT_ROOT, self.logdir_var.get())
+        preview = os.path.join(logdir, "preview_latest.png")
+        if os.path.exists(preview):
+            try:
+                mtime = os.path.getmtime(preview)
+                if mtime != self._last_mtime:
+                    self._last_mtime = mtime
+                    from PIL import Image as PILImg, ImageTk as PILTk
+                    pil = PILImg.open(preview)
+                    w, h = pil.size
+                    if w > 900:
+                        scale = 900 / w
+                        pil = pil.resize((int(w * scale), int(h * scale)),
+                                         BILINEAR)
+                    self._preview_photo = PILTk.PhotoImage(pil)
+                    self.preview_label.config(image=self._preview_photo)
+            except Exception:
+                pass
+        self.after(2000, self._check_preview)
+
 
 # -- Flatten Experiment Tab -----------------------------------------------------

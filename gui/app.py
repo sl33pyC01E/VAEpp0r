@@ -15,6 +15,7 @@ from gui.common import BG, BG_PANEL, FG, ACCENT, FONT_BOLD
 from gui.data_tabs import GeneratorTab, VideoGenTab
 from gui.models_tabs import (
     TrainingTab, InferenceTab, ConvertTab, VideoTrainTab, VideoInferenceTab,
+    FusionTrainTab,
 )
 from gui.compress_tabs import (
     FlattenTab, FlattenInferenceTab, FlattenVideoTab, FlattenVideoInferenceTab,
@@ -60,6 +61,7 @@ class App(tk.Tk):
         models_nb.add(ConvertTab(models_nb), text="Convert")
         models_nb.add(VideoTrainTab(models_nb), text="Video Train")
         models_nb.add(VideoInferenceTab(models_nb), text="Video Inf")
+        models_nb.add(FusionTrainTab(models_nb), text="Fusion Train")
         nb.add(models_frame, text="Models")
 
         # -- Compress --
