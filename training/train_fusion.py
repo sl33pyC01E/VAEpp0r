@@ -50,13 +50,12 @@ def save_preview(mini_vae, cpu_encode, cpu_decode, gen, logdir, step,
             ref_t = torch.from_numpy(ref_arr).permute(2, 0, 1).unsqueeze(0).to(device)
 
             with torch.amp.autocast(device.type, dtype=amp_dtype):
-                cpu_lat = normalize_latent(cpu_encode(ref_t))
-                cpu_lat_5d = cpu_lat.unsqueeze(1)  # (B, 1, C, H, W)
+                cpu_lat = cpu_encode(ref_t)
+                cpu_lat_5d = cpu_lat.unsqueeze(1)
                 recon_lat, _ = mini_vae(cpu_lat_5d)
-                recon_lat = recon_lat[:, -1]  # (B, C, H, W)
-                # Crop to match
+                recon_lat = recon_lat[:, -1]
                 recon_lat = recon_lat[:, :, :cpu_lat.shape[2], :cpu_lat.shape[3]]
-                recon_rgb = cpu_decode(denormalize_latent(recon_lat))
+                recon_rgb = cpu_decode(recon_lat)
 
             ref_gt = (ref_arr * 255).clip(0, 255).astype(np.uint8)
             ref_rc = recon_rgb[0, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
@@ -75,7 +74,7 @@ def save_preview(mini_vae, cpu_encode, cpu_decode, gen, logdir, step,
             recon_lat, _ = mini_vae(cpu_lat_5d)
             recon_lat = recon_lat[:, -1]
             recon_lat = recon_lat[:, :, :cpu_lat.shape[2], :cpu_lat.shape[3]]
-            recon_rgb = cpu_decode(denormalize_latent(recon_lat))
+            recon_rgb = cpu_decode(recon_lat)
 
         gt = images.cpu().numpy()
         rc = recon_rgb[:, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
@@ -172,9 +171,10 @@ def train(args):
     print("  Probing latent distribution...")
     _probe_gen = VAEpp0rGenerator(
         height=args.H, width=args.W, device=str(device),
-        bank_size=500, n_base_layers=64,
+        bank_size=args.bank_size, n_base_layers=args.n_layers,
     )
     _probe_gen.build_banks()
+    _probe_gen.disco_quadrant = True
     with torch.no_grad():
         _probe_imgs = _probe_gen.generate(16)
         _probe_lat = cpu_encode(_probe_imgs)
