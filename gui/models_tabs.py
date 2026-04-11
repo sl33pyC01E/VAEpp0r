@@ -52,7 +52,7 @@ class TrainingTab(tk.Frame):
         f.pack(side="left", padx=(0, 10))
         f, self.latent_var = make_spin(arch_row, "Latent ch", default=32)
         f.pack(side="left", padx=(0, 10))
-        f, self.enc_ch_var = make_spin(arch_row, "Enc ch", default=64)
+        f, self.enc_ch_var = make_float(arch_row, "Enc ch", "64", width=12)
         f.pack(side="left", padx=(0, 10))
         f, self.dec_ch_var = make_float(arch_row, "Dec ch", "256,128,64", width=12)
         f.pack(side="left")
@@ -63,10 +63,7 @@ class TrainingTab(tk.Frame):
         f, self.H_var = make_spin(res_row, "H", default=360)
         f.pack(side="left", padx=(0, 10))
         f, self.W_var = make_spin(res_row, "W", default=640)
-        f.pack(side="left", padx=(0, 10))
-        tk.Label(res_row, text="Spatial: 8x | Temporal: off (static)",
-                 bg=BG_PANEL, fg=FG_DIM, font=FONT_SMALL).pack(
-                     side="left", padx=(10, 0))
+        f.pack(side="left")
 
         # Params
         row1 = tk.Frame(top, bg=BG_PANEL)
@@ -82,7 +79,9 @@ class TrainingTab(tk.Frame):
 
         row2 = tk.Frame(top, bg=BG_PANEL)
         row2.pack(fill="x", pady=(5, 0))
-        f, self.w_mse_var = make_float(row2, "w_mse", 1.0)
+        f, self.w_l1_var = make_float(row2, "w_l1", 1.0)
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_mse_var = make_float(row2, "w_mse", 0.0)
         f.pack(side="left", padx=(0, 10))
         f, self.w_lpips_var = make_float(row2, "w_lpips", 0.5)
         f.pack(side="left", padx=(0, 10))
@@ -139,7 +138,7 @@ class TrainingTab(tk.Frame):
             return  # Custom — don't change anything
         self.image_ch_var.set(cfg["image_ch"])
         self.latent_var.set(cfg["latent_ch"])
-        self.enc_ch_var.set(cfg["enc_ch"])
+        self.enc_ch_var.set(str(cfg["enc_ch"]))
         self.dec_ch_var.set(cfg["dec_ch"])
 
     def start(self):
@@ -152,9 +151,10 @@ class TrainingTab(tk.Frame):
                "--total-steps", str(self.steps_var.get()),
                "--precision", self.prec_var.get(),
                "--latent-ch", str(self.latent_var.get()),
-               "--enc-ch", str(self.enc_ch_var.get()),
+               "--enc-ch", self.enc_ch_var.get(),
                "--dec-ch", self.dec_ch_var.get(),
                "--w-mse", self.w_mse_var.get(),
+               "--w-l1", self.w_l1_var.get(),
                "--w-lpips", self.w_lpips_var.get(),
                "--bank-size", str(self.min_shapes_var.get()),
                "--n-layers", str(self.max_shapes_var.get()),
@@ -624,13 +624,31 @@ class VideoTrainTab(tk.Frame):
         tk.Label(top, text="Video Training (Stage 2)", bg=BG_PANEL, fg=FG,
                  font=FONT_TITLE).pack(anchor="w")
 
+        # Architecture row
+        arch_row = tk.Frame(top, bg=BG_PANEL)
+        arch_row.pack(fill="x", pady=(10, 0))
+        f, self.latent_var = make_spin(arch_row, "Latent ch", default=32)
+        f.pack(side="left", padx=(0, 10))
+        f, self.enc_ch_var = make_float(arch_row, "Enc ch", "64", width=12)
+        f.pack(side="left", padx=(0, 10))
+        f, self.dec_ch_var = make_float(arch_row, "Dec ch", "256,128,64", width=12)
+        f.pack(side="left")
+
+        # Temporal config row
+        time_row = tk.Frame(top, bg=BG_PANEL)
+        time_row.pack(fill="x", pady=(5, 0))
+        f, self.enc_time_var = make_float(time_row, "Enc time", "true,true,false", width=16)
+        f.pack(side="left", padx=(0, 10))
+        f, self.dec_time_var = make_float(time_row, "Dec time", "false,true,true", width=16)
+        f.pack(side="left", padx=(0, 10))
+        f, self.T_var = make_spin(time_row, "T (frames)", default=24)
+        f.pack(side="left")
+
         row1 = tk.Frame(top, bg=BG_PANEL)
-        row1.pack(fill="x", pady=(10, 0))
+        row1.pack(fill="x", pady=(5, 0))
         f, self.lr_var = make_float(row1, "LR", "2e-4")
         f.pack(side="left", padx=(0, 10))
         f, self.batch_var = make_spin(row1, "Batch", default=1)
-        f.pack(side="left", padx=(0, 10))
-        f, self.T_var = make_spin(row1, "T (frames)", default=24)
         f.pack(side="left", padx=(0, 10))
         f, self.steps_var = make_spin(row1, "Total steps", default=30000)
         f.pack(side="left", padx=(0, 10))
@@ -639,7 +657,9 @@ class VideoTrainTab(tk.Frame):
 
         row2 = tk.Frame(top, bg=BG_PANEL)
         row2.pack(fill="x", pady=(5, 0))
-        f, self.w_mse_var = make_float(row2, "w_mse", 1.0)
+        f, self.w_l1_var = make_float(row2, "w_l1", 1.0)
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_mse_var = make_float(row2, "w_mse", 0.0)
         f.pack(side="left", padx=(0, 10))
         f, self.w_lpips_var = make_float(row2, "w_lpips", 0.5)
         f.pack(side="left", padx=(0, 10))
@@ -710,11 +730,17 @@ class VideoTrainTab(tk.Frame):
 
     def start(self):
         cmd = [VENV_PYTHON, "-m", "training.train_video",
+               "--latent-ch", str(self.latent_var.get()),
+               "--enc-ch", self.enc_ch_var.get(),
+               "--dec-ch", self.dec_ch_var.get(),
+               "--enc-time", self.enc_time_var.get(),
+               "--dec-time", self.dec_time_var.get(),
                "--lr", self.lr_var.get(),
                "--batch-size", str(self.batch_var.get()),
                "--T", str(self.T_var.get()),
                "--total-steps", str(self.steps_var.get()),
                "--precision", self.prec_var.get(),
+               "--w-l1", self.w_l1_var.get(),
                "--w-mse", self.w_mse_var.get(),
                "--w-lpips", self.w_lpips_var.get(),
                "--w-temporal", self.w_temp_var.get(),

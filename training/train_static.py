@@ -299,9 +299,15 @@ def train(args):
                 gt = x[:, T_in - T_match:]
                 rc = recon[:, T_out - T_match:]
 
-                mse = F.mse_loss(rc, gt)
-                total = args.w_mse * mse
-                losses["mse"] = losses.get("mse", 0) + mse.item() / accum
+                total = torch.tensor(0.0, device=device)
+                if args.w_l1 > 0:
+                    l1 = F.l1_loss(rc, gt)
+                    total = total + args.w_l1 * l1
+                    losses["l1"] = losses.get("l1", 0) + l1.item() / accum
+                if args.w_mse > 0:
+                    mse = F.mse_loss(rc, gt)
+                    total = total + args.w_mse * mse
+                    losses["mse"] = losses.get("mse", 0) + mse.item() / accum
 
                 if lpips_fn is not None:
                     BT = rc.shape[0] * T_match
@@ -386,7 +392,8 @@ def main():
                    choices=["fp16", "bf16", "fp32"])
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--w-mse", type=float, default=1.0)
+    p.add_argument("--w-l1", type=float, default=1.0)
+    p.add_argument("--w-mse", type=float, default=0.0)
     p.add_argument("--w-lpips", type=float, default=0.5)
     p.add_argument("--bank-size", type=int, default=500)
     p.add_argument("--n-layers", type=int, default=128)
