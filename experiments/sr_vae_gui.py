@@ -79,7 +79,12 @@ class SRVAETab(tk.Frame):
         f, self.up_blocks = make_spin(row1, "Up blocks", default=4)
         f.pack(side="left", padx=(0, 10))
         f, self.down_hidden = make_spin(row1, "Down hidden", default=32)
-        f.pack(side="left")
+        f.pack(side="left", padx=(0, 10))
+        self.pretrained_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row1, text="Pretrained", variable=self.pretrained_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, font=FONT_SMALL
+                       ).pack(side="left")
 
         # Training
         row2 = tk.Frame(top, bg=BG_PANEL)
@@ -166,7 +171,10 @@ class SRVAETab(tk.Frame):
                "--upscaler", self.up_var.get(),
                "--up-hidden", str(self.up_hidden.get()),
                "--up-blocks", str(self.up_blocks.get()),
-               "--down-hidden", str(self.down_hidden.get()),
+               "--down-hidden", str(self.down_hidden.get())]
+        if self.pretrained_var.get():
+            cmd.append("--pretrained")
+        cmd += [
                "--lr", self.lr_var.get(),
                "--batch-size", str(self.batch_var.get()),
                "--total-steps", str(self.steps_var.get()),

@@ -501,10 +501,35 @@ def train(args):
         up = FSRCNNUpscaler(args.scale, channels=3, d=args.up_hidden,
                             s=max(args.up_hidden // 4, 8), m=args.up_blocks)
     elif args.upscaler == "rrdb":
-        up = RRDBUpscaler(args.scale, channels=3, nf=args.up_hidden,
-                          nb=args.up_blocks, gc=args.up_hidden // 2)
+        if getattr(args, 'pretrained', False) and args.scale == 4:
+            # Force Real-ESRGAN architecture for pretrained weights
+            up = RRDBUpscaler(4, channels=3, nf=64, nb=23, gc=32)
+        else:
+            up = RRDBUpscaler(args.scale, channels=3, nf=args.up_hidden,
+                              nb=args.up_blocks, gc=args.up_hidden // 2)
 
     model = SRVAE(down, up, args.scale).to(device)
+
+    # -- Load pretrained upscaler weights --
+    if getattr(args, 'pretrained', False):
+        if args.upscaler == "rrdb" and args.scale == 4:
+            _url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
+            _cache = os.path.join(PROJECT_ROOT if 'PROJECT_ROOT' in dir()
+                                  else os.path.dirname(os.path.dirname(
+                                      os.path.abspath(__file__))),
+                                  "pretrained", "RealESRGAN_x4plus.pth")
+            if not os.path.exists(_cache):
+                print(f"Downloading Real-ESRGAN weights...")
+                os.makedirs(os.path.dirname(_cache), exist_ok=True)
+                torch.hub.download_url_to_file(_url, _cache)
+            _ckpt = torch.load(_cache, map_location="cpu", weights_only=False)
+            _sd = _ckpt.get("params_ema", _ckpt.get("params", _ckpt))
+            # Map Real-ESRGAN keys to our RRDB keys
+            model.upscaler.load_state_dict(_sd, strict=False)
+            print(f"Loaded pretrained Real-ESRGAN x4 weights")
+        else:
+            print(f"WARNING: no pretrained weights for {args.upscaler} "
+                  f"at {args.scale}x, training from scratch")
     pc = model.param_count()
     print(f"SR VAE: scale={args.scale}x")
     print(f"  Downscaler: {args.downscaler}, {pc['downscaler']:,} params")
@@ -729,6 +754,9 @@ def main():
                    choices=["espcn", "simple", "srcnn", "fsrcnn", "rrdb"],
                    help="Upscale network (espcn=PixelShuffle, srcnn=classic, "
                         "fsrcnn=fast, rrdb=Real-ESRGAN style)")
+    p.add_argument("--pretrained", action="store_true",
+                   help="Load pretrained upscaler weights (rrdb 4x only, "
+                        "downloads Real-ESRGAN weights)")
     p.add_argument("--up-hidden", type=int, default=64,
                    help="Upscaler hidden channels")
     p.add_argument("--up-blocks", type=int, default=4,
