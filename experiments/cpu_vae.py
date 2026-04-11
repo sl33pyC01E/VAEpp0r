@@ -1571,9 +1571,11 @@ def train_s1(args):
         # Build mask from the active model's fold divisor
         ps = active_model.patch_size
         stride = active_model.stride
-        H, W = args.H, args.W
         if mode == "extend":
-            H, W = spatial_sizes[active_stage]
+            # Use the upstream output size (= active model's input)
+            H, W = spatial_sizes[-2] if len(spatial_sizes) >= 2 else (args.H, args.W)
+        else:
+            H, W = args.H, args.W
         pad_h, pad_w = active_model._pad_for_patches(H, W)
         H_pad, W_pad = H + pad_h, W + pad_w
         pH, pW = active_model._patch_grid_size(H, W)
@@ -1741,14 +1743,20 @@ def train_s1(args):
                         total = torch.tensor(0.0, device=device)
                         if args.w_l1 > 0:
                             if boundary_mask is not None:
-                                l1 = (boundary_mask * (recon - target).abs()).mean()
+                                bm = boundary_mask
+                                if bm.shape != recon.shape:
+                                    bm = bm[:, :recon.shape[1], :recon.shape[2], :recon.shape[3]]
+                                l1 = (bm * (recon - target).abs()).mean()
                             else:
                                 l1 = F.l1_loss(recon, target)
                             total = total + args.w_l1 * l1
                             losses["l1"] = losses.get("l1", 0) + l1.item() / accum
                         if args.w_mse > 0:
                             if boundary_mask is not None:
-                                mse = (boundary_mask * (recon - target).pow(2)).mean()
+                                bm = boundary_mask
+                                if bm.shape != recon.shape:
+                                    bm = bm[:, :recon.shape[1], :recon.shape[2], :recon.shape[3]]
+                                mse = (bm * (recon - target).pow(2)).mean()
                             else:
                                 mse = F.mse_loss(recon, target)
                             total = total + args.w_mse * mse
