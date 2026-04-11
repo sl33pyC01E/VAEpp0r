@@ -66,7 +66,8 @@ class SRVAETab(tk.Frame):
         tk.Label(uf, text="Upscaler", bg=BG_PANEL, fg=FG_DIM,
                  font=FONT_SMALL).pack(anchor="w")
         self.up_var = tk.StringVar(value="espcn")
-        up_menu = tk.OptionMenu(uf, self.up_var, "espcn", "simple")
+        up_menu = tk.OptionMenu(uf, self.up_var,
+                                "espcn", "srcnn", "fsrcnn", "rrdb", "simple")
         up_menu.config(bg=BG_INPUT, fg=FG, font=FONT_SMALL,
                        activebackground=BG_PANEL, activeforeground=FG,
                        highlightthickness=0, borderwidth=0)

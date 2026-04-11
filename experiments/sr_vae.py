@@ -155,6 +155,158 @@ class ESPCNUpscaler(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
+class SRCNNUpscaler(nn.Module):
+    """SRCNN-style: bilinear upsample then 3-layer conv refinement.
+
+    The original super-resolution CNN. ~57K params at default settings.
+    """
+    def __init__(self, scale, channels=3, f1=64, f2=32):
+        super().__init__()
+        self.scale = scale
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, f1, 9, padding=4),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(f1, f2, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(f2, channels, 5, padding=2),
+        )
+
+    def forward(self, x):
+        x_up = F.interpolate(x, scale_factor=self.scale, mode="bicubic",
+                              align_corners=False)
+        return self.net(x_up) + x_up
+
+    def param_count(self):
+        return sum(p.numel() for p in self.parameters())
+
+
+class FSRCNNUpscaler(nn.Module):
+    """FSRCNN-style: feature extraction at LR, deconv upscale.
+
+    Faster than SRCNN — all heavy conv at low resolution.
+    ~12K params at default settings.
+    """
+    def __init__(self, scale, channels=3, d=56, s=12, m=4):
+        super().__init__()
+        self.scale = scale
+        n_up = int(math.log2(scale))
+
+        # Feature extraction
+        layers = [nn.Conv2d(channels, d, 5, padding=2), nn.PReLU()]
+        # Shrinking
+        layers += [nn.Conv2d(d, s, 1), nn.PReLU()]
+        # Mapping (m layers)
+        for _ in range(m):
+            layers += [nn.Conv2d(s, s, 3, padding=1), nn.PReLU()]
+        # Expanding
+        layers += [nn.Conv2d(s, d, 1), nn.PReLU()]
+        self.features = nn.Sequential(*layers)
+
+        # Deconv upscale stages
+        upscale = []
+        for i in range(n_up):
+            out_ch = d if i < n_up - 1 else channels
+            upscale.append(
+                nn.ConvTranspose2d(d, out_ch, 3, stride=2, padding=1,
+                                   output_padding=1))
+            if i < n_up - 1:
+                upscale.append(nn.PReLU())
+            d = out_ch
+        self.upscale = nn.Sequential(*upscale)
+
+    def forward(self, x):
+        h = self.features(x)
+        return self.upscale(h)
+
+    def param_count(self):
+        return sum(p.numel() for p in self.parameters())
+
+
+class RRDBUpscaler(nn.Module):
+    """RRDB-style upscaler (Real-ESRGAN architecture).
+
+    Residual-in-Residual Dense Blocks for high quality reconstruction.
+    Heavier than ESPCN but higher quality ceiling.
+
+    Args:
+        scale: upscale factor (power of 2)
+        channels: I/O channels (3 for RGB)
+        nf: number of features
+        nb: number of RRDB blocks
+        gc: growth channels in dense blocks
+    """
+    def __init__(self, scale, channels=3, nf=64, nb=4, gc=32):
+        super().__init__()
+        self.scale = scale
+        n_up = int(math.log2(scale))
+
+        self.conv_first = nn.Conv2d(channels, nf, 3, padding=1)
+
+        # RRDB blocks
+        self.body = nn.Sequential(*[_RRDB(nf, gc) for _ in range(nb)])
+        self.conv_body = nn.Conv2d(nf, nf, 3, padding=1)
+
+        # Upscale
+        upscale = []
+        for i in range(n_up):
+            upscale.extend([
+                nn.Conv2d(nf, nf * 4, 3, padding=1),
+                nn.PixelShuffle(2),
+                nn.LeakyReLU(0.2, inplace=True),
+            ])
+        self.upscale = nn.Sequential(*upscale)
+
+        self.conv_hr = nn.Conv2d(nf, nf, 3, padding=1)
+        self.conv_last = nn.Conv2d(nf, channels, 3, padding=1)
+        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
+
+    def forward(self, x):
+        fea = self.conv_first(x)
+        trunk = self.conv_body(self.body(fea))
+        fea = fea + trunk
+        fea = self.upscale(fea)
+        out = self.conv_last(self.lrelu(self.conv_hr(fea)))
+        return out
+
+    def param_count(self):
+        return sum(p.numel() for p in self.parameters())
+
+
+class _DenseBlock(nn.Module):
+    """Dense block for RRDB."""
+    def __init__(self, nf=64, gc=32):
+        super().__init__()
+        self.conv1 = nn.Conv2d(nf, gc, 3, padding=1)
+        self.conv2 = nn.Conv2d(nf + gc, gc, 3, padding=1)
+        self.conv3 = nn.Conv2d(nf + 2 * gc, gc, 3, padding=1)
+        self.conv4 = nn.Conv2d(nf + 3 * gc, gc, 3, padding=1)
+        self.conv5 = nn.Conv2d(nf + 4 * gc, nf, 3, padding=1)
+        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
+
+    def forward(self, x):
+        x1 = self.lrelu(self.conv1(x))
+        x2 = self.lrelu(self.conv2(torch.cat((x, x1), 1)))
+        x3 = self.lrelu(self.conv3(torch.cat((x, x1, x2), 1)))
+        x4 = self.lrelu(self.conv4(torch.cat((x, x1, x2, x3), 1)))
+        x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
+        return x5 * 0.2 + x
+
+
+class _RRDB(nn.Module):
+    """Residual in Residual Dense Block."""
+    def __init__(self, nf, gc=32):
+        super().__init__()
+        self.rdb1 = _DenseBlock(nf, gc)
+        self.rdb2 = _DenseBlock(nf, gc)
+        self.rdb3 = _DenseBlock(nf, gc)
+
+    def forward(self, x):
+        out = self.rdb1(x)
+        out = self.rdb2(out)
+        out = self.rdb3(out)
+        return out * 0.2 + x
+
+
 class SimpleUpscaler(nn.Module):
     """Simple upscaler using bilinear upsample + conv refinement."""
     def __init__(self, scale, channels=3, hidden=64, n_blocks=4):
@@ -342,6 +494,15 @@ def train(args):
     elif args.upscaler == "simple":
         up = SimpleUpscaler(args.scale, channels=3, hidden=args.up_hidden,
                             n_blocks=args.up_blocks)
+    elif args.upscaler == "srcnn":
+        up = SRCNNUpscaler(args.scale, channels=3, f1=args.up_hidden,
+                           f2=args.up_hidden // 2)
+    elif args.upscaler == "fsrcnn":
+        up = FSRCNNUpscaler(args.scale, channels=3, d=args.up_hidden,
+                            s=max(args.up_hidden // 4, 8), m=args.up_blocks)
+    elif args.upscaler == "rrdb":
+        up = RRDBUpscaler(args.scale, channels=3, nf=args.up_hidden,
+                          nb=args.up_blocks, gc=args.up_hidden // 2)
 
     model = SRVAE(down, up, args.scale).to(device)
     pc = model.param_count()
@@ -565,8 +726,9 @@ def main():
                    choices=["area", "bilinear", "bicubic", "lanczos", "learned"],
                    help="Downscale method")
     p.add_argument("--upscaler", default="espcn",
-                   choices=["espcn", "simple"],
-                   help="Upscale network")
+                   choices=["espcn", "simple", "srcnn", "fsrcnn", "rrdb"],
+                   help="Upscale network (espcn=PixelShuffle, srcnn=classic, "
+                        "fsrcnn=fast, rrdb=Real-ESRGAN style)")
     p.add_argument("--up-hidden", type=int, default=64,
                    help="Upscaler hidden channels")
     p.add_argument("--up-blocks", type=int, default=4,
