@@ -137,6 +137,11 @@ class TrainingTab(tk.Frame):
         tk.Checkbutton(btn_row, text="Disco Quadrant", variable=self.disco_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG_PANEL, activeforeground=FG,
+                       font=FONT_SMALL).pack(side="left", padx=(0, 10))
+        self.haar_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(btn_row, text="Haar 2x", variable=self.haar_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, activeforeground=FG,
                        font=FONT_SMALL).pack(side="left")
 
         # Preview
@@ -189,6 +194,8 @@ class TrainingTab(tk.Frame):
             cmd += ["--resume", resume]
         if self.disco_var.get():
             cmd.append("--disco")
+        if self.haar_var.get():
+            cmd.append("--haar")
         prev_img = self.preview_img_var.get().strip()
         if prev_img:
             cmd += ["--preview-image", prev_img]
