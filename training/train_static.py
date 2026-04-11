@@ -30,42 +30,82 @@ from core.generator import VAEpp0rGenerator
 
 # -- Preview -------------------------------------------------------------------
 
+def _load_preview_image(path, H, W, device):
+    """Load a real image for preview target."""
+    from PIL import Image
+    img = Image.open(path).convert("RGB")
+    img = img.resize((W, H), Image.BILINEAR)
+    arr = np.array(img, dtype=np.float32) / 255.0
+    return torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).unsqueeze(0).to(device)
+
+
 @torch.no_grad()
-def save_preview(model, gen, logdir, step, device, amp_dtype):
-    """Save GT | Recon grid as PNG."""
+def save_preview(model, gen, logdir, step, device, amp_dtype,
+                 preview_image=None):
+    """Save GT | Recon grid as PNG with optional reference image."""
     try:
         model.eval()
-        images = gen.generate(8)  # (8, 3, H, W)
-        x = images.unsqueeze(1).to(device)  # (8, 1, 3, H, W)
+        from PIL import Image
+
+        H, W = gen.H, gen.W
+        sections = []
+
+        # -- Reference image (large, top) --
+        if preview_image and os.path.exists(preview_image):
+            ref = _load_preview_image(preview_image, H, W, device)
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                ref_recon, _ = model(ref)
+            ref_gt = ref[0, 0, :3].cpu().numpy().transpose(1, 2, 0)
+            ref_rc = ref_recon[0, -1, :3, :H, :W].clamp(0, 1).float().cpu().numpy().transpose(1, 2, 0)
+            ref_gt = (ref_gt * 255).clip(0, 255).astype(np.uint8)
+            ref_rc = (ref_rc * 255).clip(0, 255).astype(np.uint8)
+            sep_v = np.full((H, 4, 3), 14, dtype=np.uint8)
+            sections.append(np.concatenate([ref_gt, sep_v, ref_rc], axis=1))
+            del ref, ref_recon
+
+        # -- Synthetic strip --
+        images = gen.generate(8)
+        x = images.unsqueeze(1).to(device)
 
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             recon, _ = model(x)
 
-        T_r = recon.shape[1]
-        # Crop to input spatial size (model may pad for divisibility)
-        rc = recon[:, -1, :3, :gen.H, :gen.W].clamp(0, 1).float().cpu().numpy()
-        gt = images.cpu().numpy()  # (8, 3, H, W)
+        rc = recon[:, -1, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
+        gt = images.cpu().numpy()
 
         del recon, x
-        model.train()
 
-        from PIL import Image
-        H, W = gen.H, gen.W
-        # 4x2 grid: 4 columns of GT|Recon pairs
-        cols = 4
-        rows = 2
-        grid_w = cols * (W * 2 + 4) + (cols - 1) * 2
+        cols, rows = 4, 2
+        sep = 4
+        grid_w = cols * (W * 2 + sep) + (cols - 1) * 2
         grid_h = rows * H + (rows - 1) * 2
 
-        grid = np.full((grid_h, grid_w, 3), 14, dtype=np.uint8)
+        synth_grid = np.full((grid_h, grid_w, 3), 14, dtype=np.uint8)
         for i in range(min(8, len(gt))):
             r, c = i // cols, i % cols
             gy = r * (H + 2)
-            gx = c * (W * 2 + 4 + 2)
+            gx = c * (W * 2 + sep + 2)
             g_img = (gt[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
             r_img = (rc[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-            grid[gy:gy+H, gx:gx+W] = g_img
-            grid[gy:gy+H, gx+W+2:gx+W*2+2] = r_img
+            synth_grid[gy:gy+H, gx:gx+W] = g_img
+            synth_grid[gy:gy+H, gx+W+2:gx+W*2+2] = r_img
+        sections.append(synth_grid)
+
+        # -- Combine --
+        if len(sections) > 1:
+            from PIL import Image as _PILImg
+            syn_w = sections[1].shape[1]
+            ref_pil = _PILImg.fromarray(sections[0])
+            scale = syn_w / sections[0].shape[1]
+            ref_pil = ref_pil.resize((syn_w, int(sections[0].shape[0] * scale)),
+                                      _PILImg.BILINEAR)
+            sections[0] = np.array(ref_pil)
+            gap = np.full((6, syn_w, 3), 14, dtype=np.uint8)
+            grid = np.concatenate([sections[0], gap, sections[1]], axis=0)
+        else:
+            grid = sections[0]
+
+        model.train()
 
         stepped = os.path.join(logdir, f"preview_{step:06d}.png")
         latest = os.path.join(logdir, "preview_latest.png")
@@ -238,6 +278,14 @@ def train(args):
     print(f"Precision: {args.precision}, Device: {device}")
     print(flush=True)
 
+    def _ckpt_name(step):
+        ec_str = ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else str(enc_ch)
+        dc_str = ",".join(str(x) for x in dec_ch)
+        n_stages = len(dec_ch)
+        spatial = 2 ** n_stages
+        steps_k = f"{step // 1000}k" if step >= 1000 else str(step)
+        return f"vae-{args.image_ch}ch-lc{latent_ch}-ec{ec_str}-dc{dc_str}-{spatial}x-{steps_k}.pt"
+
     def _make_checkpoint():
         return {
             "model": model.state_dict(),
@@ -256,7 +304,9 @@ def train(args):
         }
 
     # -- Initial preview --
-    save_preview(model, gen, str(logdir), global_step, device, amp_dtype)
+    preview_image = getattr(args, 'preview_image', None)
+    save_preview(model, gen, str(logdir), global_step, device, amp_dtype,
+                 preview_image=preview_image)
 
     # -- Loop --
     t0 = time.time()
@@ -351,17 +401,18 @@ def train(args):
         # -- Preview --
         if global_step % args.preview_every == 0:
             save_preview(model, gen, str(logdir), global_step,
-                         device, amp_dtype)
+                         device, amp_dtype, preview_image=preview_image)
 
         # -- Checkpoint --
         if global_step % args.save_every == 0:
             d = _make_checkpoint()
-            p = logdir / f"step_{global_step:06d}.pt"
-            torch.save(d, p)
+            named = _ckpt_name(global_step)
+            torch.save(d, logdir / named)
             torch.save(d, logdir / "latest.pt")
-            print(f"  saved {p}", flush=True)
+            print(f"  saved {named}", flush=True)
 
-            ckpts = sorted(logdir.glob("step_*.pt"),
+            ckpts = sorted([f for f in logdir.glob("*.pt")
+                           if f.name != "latest.pt"],
                            key=lambda x: x.stat().st_mtime)
             while len(ckpts) > 10:
                 ckpts.pop(0).unlink()
@@ -369,9 +420,10 @@ def train(args):
     # Save on exit
     if global_step > start_step:
         d = _make_checkpoint()
-        torch.save(d, logdir / f"step_{global_step:06d}.pt")
+        named = _ckpt_name(global_step)
+        torch.save(d, logdir / named)
         torch.save(d, logdir / "latest.pt")
-        print(f"  saved step {global_step}", flush=True)
+        print(f"  saved {named}", flush=True)
 
     print(f"\nDone. {global_step - start_step} steps in "
           f"{(time.time() - t0) / 60:.1f}min", flush=True)
@@ -417,6 +469,8 @@ def main():
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=5000)
     p.add_argument("--preview-every", type=int, default=100)
+    p.add_argument("--preview-image", default=None,
+                   help="Path to reference image for tracking progress")
     args = p.parse_args()
     train(args)
 

@@ -107,6 +107,27 @@ class TrainingTab(tk.Frame):
         f.pack(side="left")
 
         # Buttons
+        # Preview image
+        prev_row = tk.Frame(top, bg=BG_PANEL)
+        prev_row.pack(fill="x", pady=(5, 0))
+        self.preview_img_var = tk.StringVar(value="")
+        f = tk.Frame(prev_row, bg=BG_PANEL)
+        tk.Label(f, text="Preview image", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        ef = tk.Frame(f, bg=BG_PANEL)
+        tk.Entry(ef, textvariable=self.preview_img_var, bg=BG_INPUT, fg=FG,
+                 font=FONT, width=45, borderwidth=0,
+                 insertbackground=FG).pack(side="left", fill="x", expand=True)
+        from tkinter import filedialog
+        make_btn(ef, "Browse",
+                 lambda: self.preview_img_var.set(
+                     filedialog.askopenfilename(
+                         filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.webp"),
+                                    ("All", "*.*")]) or self.preview_img_var.get()),
+                 ACCENT, width=7).pack(side="left", padx=(5, 0))
+        ef.pack(fill="x")
+        f.pack(side="left", fill="x", expand=True)
+
         btn_row = tk.Frame(top, bg=BG_PANEL)
         btn_row.pack(fill="x", pady=(10, 0))
         make_btn(btn_row, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
@@ -168,6 +189,9 @@ class TrainingTab(tk.Frame):
             cmd += ["--resume", resume]
         if self.disco_var.get():
             cmd.append("--disco")
+        prev_img = self.preview_img_var.get().strip()
+        if prev_img:
+            cmd += ["--preview-image", prev_img]
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop_save(self):
@@ -697,6 +721,29 @@ class VideoTrainTab(tk.Frame):
                        selectcolor=BG_INPUT, activebackground=BG_PANEL,
                        font=FONT).pack(side="left")
 
+        # Preview video
+        prev_row = tk.Frame(top, bg=BG_PANEL)
+        prev_row.pack(fill="x", pady=(5, 0))
+        self.preview_vid_var = tk.StringVar(value="")
+        f = tk.Frame(prev_row, bg=BG_PANEL)
+        tk.Label(f, text="Preview video", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        ef = tk.Frame(f, bg=BG_PANEL)
+        tk.Entry(ef, textvariable=self.preview_vid_var, bg=BG_INPUT, fg=FG,
+                 font=FONT, width=40, borderwidth=0,
+                 insertbackground=FG).pack(side="left", fill="x", expand=True)
+        from tkinter import filedialog
+        make_btn(ef, "Browse",
+                 lambda: self.preview_vid_var.set(
+                     filedialog.askopenfilename(
+                         filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv"),
+                                    ("All", "*.*")]) or self.preview_vid_var.get()),
+                 ACCENT, width=7).pack(side="left", padx=(5, 0))
+        ef.pack(fill="x")
+        f.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        f2, self.frame_skip_var = make_spin(prev_row, "Frame skip", default=0)
+        f2.pack(side="left")
+
         btn_row = tk.Frame(top, bg=BG_PANEL)
         btn_row.pack(fill="x", pady=(10, 0))
         make_btn(btn_row, "Train", self.start, GREEN).pack(
@@ -757,6 +804,10 @@ class VideoTrainTab(tk.Frame):
             cmd += ["--fresh-opt"]
         if self.disco_var.get():
             cmd.append("--disco")
+        prev_vid = self.preview_vid_var.get().strip()
+        if prev_vid:
+            cmd += ["--preview-image", prev_vid,
+                    "--preview-frame-skip", str(self.frame_skip_var.get())]
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop_save(self):

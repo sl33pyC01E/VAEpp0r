@@ -31,7 +31,8 @@ from core.generator import VAEpp0rGenerator
 # -- Preview -------------------------------------------------------------------
 
 @torch.no_grad()
-def save_preview(model, gen, logdir, step, device, amp_dtype, T=8):
+def save_preview(model, gen, logdir, step, device, amp_dtype, T=8,
+                  preview_image=None, preview_frame_skip=0):
     """Save GT | Recon side-by-side mp4 video."""
     try:
         model.eval()
@@ -94,6 +95,60 @@ def save_preview(model, gen, logdir, step, device, amp_dtype, T=8):
                 raise
 
         print(f"  preview: {stepped} ({T_show} frames)", flush=True)
+
+        # -- Reference video preview (MP4) --
+        if preview_image and os.path.exists(preview_image):
+            try:
+                import cv2
+                cap = cv2.VideoCapture(preview_image)
+                frame_skip = preview_frame_skip if preview_frame_skip else 0
+                # Skip frames
+                for _ in range(frame_skip):
+                    cap.read()
+                ref_frames = []
+                for _ in range(T_show):
+                    ret, frm = cap.read()
+                    if not ret:
+                        break
+                    frm = cv2.cvtColor(frm, cv2.COLOR_BGR2RGB)
+                    frm = cv2.resize(frm, (W, H))
+                    ref_frames.append(frm)
+                cap.release()
+
+                if len(ref_frames) >= 2:
+                    ref_arr = np.stack(ref_frames).astype(np.float32) / 255.0
+                    ref_t = torch.from_numpy(ref_arr).permute(0, 3, 1, 2).unsqueeze(0).to(device)
+                    with torch.amp.autocast("cuda", dtype=amp_dtype):
+                        ref_recon, _ = model(ref_t)
+                    T_ref_out = ref_recon.shape[1]
+                    T_ref_in = ref_t.shape[1]
+                    T_ref_show = min(T_ref_out, T_ref_in)
+                    ref_gt = ref_t[0, T_ref_in - T_ref_show:].float().cpu().numpy()
+                    ref_rc = ref_recon[0, T_ref_out - T_ref_show:, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
+
+                    ref_path = os.path.join(logdir, "preview_ref_latest.mp4")
+                    frame_w = W * 2 + 4
+                    cmd = ["ffmpeg", "-y", "-v", "quiet",
+                           "-f", "rawvideo", "-pix_fmt", "rgb24",
+                           "-s", f"{frame_w}x{H}", "-r", "30",
+                           "-i", "pipe:0",
+                           "-c:v", "libx264", "-crf", "18",
+                           "-pix_fmt", "yuv420p", ref_path]
+                    ref_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+                    for t in range(T_ref_show):
+                        g = (ref_gt[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        r = (ref_rc[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        frame = np.concatenate([g, sep, r], axis=1)
+                        ref_proc.stdin.write(frame.tobytes())
+                    ref_proc.stdin.close()
+                    ref_proc.wait()
+                    print(f"  ref preview: {ref_path} ({T_ref_show} frames)", flush=True)
+                    del ref_t, ref_recon
+            except ImportError:
+                print("  ref preview skipped (pip install opencv-python)", flush=True)
+            except Exception as ref_e:
+                print(f"  ref preview failed: {ref_e}", flush=True)
+
     except Exception as e:
         import traceback
         print(f"  preview failed: {e}", flush=True)
@@ -289,6 +344,16 @@ def train(args):
     print(f"Precision: {args.precision}, Device: {device}")
     print(flush=True)
 
+    def _ckpt_name(step):
+        ec_str = ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else str(enc_ch)
+        dc_str = ",".join(str(x) for x in dec_ch)
+        n_stages = len(dec_ch)
+        spatial = 2 ** n_stages
+        t_down = sum(1 for x in enc_t if x)
+        temporal = 2 ** t_down if t_down > 0 else 1
+        steps_k = f"{step // 1000}k" if step >= 1000 else str(step)
+        return f"vae-3ch-lc{latent_ch}-ec{ec_str}-dc{dc_str}-S{spatial}x-T{temporal}x-{steps_k}.pt"
+
     def _make_checkpoint():
         return {
             "model": model.state_dict(),
@@ -311,7 +376,9 @@ def train(args):
         }
 
     # -- Initial preview --
-    save_preview(model, gen, str(logdir), global_step, device, amp_dtype, args.T)
+    preview_image = getattr(args, 'preview_image', None)
+    save_preview(model, gen, str(logdir), global_step, device, amp_dtype,
+                 args.T, preview_image=preview_image)
 
     # -- Loop --
     t0 = time.time()
@@ -417,17 +484,20 @@ def train(args):
         # -- Preview --
         if global_step % args.preview_every == 0:
             save_preview(model, gen, str(logdir), global_step,
-                         device, amp_dtype, args.T)
+                         device, amp_dtype, args.T,
+                         preview_image=preview_image,
+                 preview_frame_skip=getattr(args, 'preview_frame_skip', 0))
 
         # -- Checkpoint --
         if global_step % args.save_every == 0:
             d = _make_checkpoint()
-            p = logdir / f"step_{global_step:06d}.pt"
-            torch.save(d, p)
+            named = _ckpt_name(global_step)
+            torch.save(d, logdir / named)
             torch.save(d, logdir / "latest.pt")
-            print(f"  saved {p}", flush=True)
+            print(f"  saved {named}", flush=True)
 
-            ckpts = sorted(logdir.glob("step_*.pt"),
+            ckpts = sorted([f for f in logdir.glob("*.pt")
+                           if f.name != "latest.pt"],
                            key=lambda x: x.stat().st_mtime)
             while len(ckpts) > 10:
                 ckpts.pop(0).unlink()
@@ -435,9 +505,10 @@ def train(args):
     # Save on exit
     if global_step > start_step:
         d = _make_checkpoint()
-        torch.save(d, logdir / f"step_{global_step:06d}.pt")
+        named = _ckpt_name(global_step)
+        torch.save(d, logdir / named)
         torch.save(d, logdir / "latest.pt")
-        print(f"  saved step {global_step}", flush=True)
+        print(f"  saved {named}", flush=True)
 
     print(f"\nDone. {global_step - start_step} steps in "
           f"{(time.time() - t0) / 60:.1f}min", flush=True)
@@ -487,6 +558,10 @@ def main():
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=5000)
     p.add_argument("--preview-every", type=int, default=100)
+    p.add_argument("--preview-image", default=None,
+                   help="Path to reference video (mp4) for tracking progress")
+    p.add_argument("--preview-frame-skip", type=int, default=0,
+                   help="Number of frames to skip into the reference video")
     args = p.parse_args()
     train(args)
 
