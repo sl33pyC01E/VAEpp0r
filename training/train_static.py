@@ -42,7 +42,8 @@ def save_preview(model, gen, logdir, step, device, amp_dtype):
             recon, _ = model(x)
 
         T_r = recon.shape[1]
-        rc = recon[:, -1, :3].clamp(0, 1).float().cpu().numpy()  # (8, 3, H, W)
+        # Crop to input spatial size (model may pad for divisibility)
+        rc = recon[:, -1, :3, :gen.H, :gen.W].clamp(0, 1).float().cpu().numpy()
         gt = images.cpu().numpy()  # (8, 3, H, W)
 
         del recon, x
@@ -298,6 +299,8 @@ def train(args):
                 T_match = min(T_out, T_in)
                 gt = x[:, T_in - T_match:]
                 rc = recon[:, T_out - T_match:]
+                # Crop to input spatial size (model may pad for divisibility)
+                rc = rc[:, :, :, :args.H, :args.W]
 
                 total = torch.tensor(0.0, device=device)
                 if args.w_l1 > 0:
