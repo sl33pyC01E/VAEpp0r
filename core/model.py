@@ -100,13 +100,48 @@ class ResidualUpsampleAdd(nn.Module):
 class MemBlock(nn.Module):
     def __init__(self, n_in, n_out):
         super().__init__()
-        self.conv = nn.Sequential(conv(n_in * 2, n_out), nn.ReLU(inplace=True),
-                                  conv(n_out, n_out), nn.ReLU(inplace=True),
-                                  conv(n_out, n_out))
+        num_groups = min(8, n_out // 8) if n_out >= 8 else 1
+        self.conv = nn.Sequential(
+            conv(n_in * 2, n_out),
+            nn.GroupNorm(num_groups, n_out),   # slot A
+            nn.ReLU(inplace=True),
+            conv(n_out, n_out),
+            nn.GroupNorm(num_groups, n_out),   # slot B
+            nn.ReLU(inplace=True),
+            conv(n_out, n_out),
+        )
+        self.norm_out = nn.GroupNorm(num_groups, n_out)  # slot C
         self.skip = nn.Conv2d(n_in, n_out, 1, bias=False) if n_in != n_out else nn.Identity()
         self.act = nn.ReLU(inplace=True)
+
     def forward(self, x, past):
-        return self.act(self.conv(torch.cat([x, past], 1)) + self.skip(x))
+        h = self.conv(torch.cat([x, past], 1))
+        return self.act(self.norm_out(h) + self.skip(x))
+
+
+class SpatialLinearAttention(nn.Module):
+    def __init__(self, n_ch, num_heads=8):
+        super().__init__()
+        assert n_ch % num_heads == 0
+        n_groups = min(8, n_ch // 8)
+        self.norm = nn.GroupNorm(n_groups, n_ch)
+        self.qkv = nn.Conv2d(n_ch, 3 * n_ch, 1, bias=False)
+        self.proj = nn.Conv2d(n_ch, n_ch, 1, bias=False)
+        self.heads = num_heads
+        self.d = n_ch // num_heads
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        N = H * W
+        h = self.norm(x)
+        qkv = self.qkv(h).reshape(B * self.heads, 3, self.d, N)
+        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        k = k.softmax(dim=-1)
+        ctx = k @ v.transpose(-2, -1)
+        q = q.softmax(dim=-2)
+        out = (ctx.transpose(-2, -1) @ q)
+        out = out.reshape(B, C, H, W)
+        return x + self.proj(out)
 
 class TPool(nn.Module):
     def __init__(self, n_f, stride):
@@ -262,11 +297,21 @@ class MiniVAE(nn.Module):
                 enc_layers.append(ResidualDownsample(prev_ch, cur_ch))
             else:
                 enc_layers.append(conv(prev_ch, cur_ch, stride=2, bias=False))
-            enc_layers.extend([
-                MemBlock(cur_ch, cur_ch),
-                MemBlock(cur_ch, cur_ch),
-                MemBlock(cur_ch, cur_ch),
-            ])
+            if i == n_stages - 1:
+                enc_layers.extend([
+                    MemBlock(cur_ch, cur_ch),
+                    SpatialLinearAttention(cur_ch),
+                    MemBlock(cur_ch, cur_ch),
+                    SpatialLinearAttention(cur_ch),
+                    MemBlock(cur_ch, cur_ch),
+                    SpatialLinearAttention(cur_ch),
+                ])
+            else:
+                enc_layers.extend([
+                    MemBlock(cur_ch, cur_ch),
+                    MemBlock(cur_ch, cur_ch),
+                    MemBlock(cur_ch, cur_ch),
+                ])
         enc_layers.append(conv(ec[-1], latent_channels))
         self.encoder = nn.Sequential(*enc_layers)
 
@@ -275,11 +320,21 @@ class MiniVAE(nn.Module):
         dec_layers = [Clamp(), conv(latent_channels, n_f[0]), nn.ReLU(inplace=True)]
         for i in range(n_stages):
             out_ch = n_f[i + 1] if i < n_stages - 1 else n_f[i]
-            dec_layers.extend([
-                MemBlock(n_f[i], n_f[i]),
-                MemBlock(n_f[i], n_f[i]),
-                MemBlock(n_f[i], n_f[i]),
-            ])
+            if i == 0:
+                dec_layers.extend([
+                    MemBlock(n_f[i], n_f[i]),
+                    SpatialLinearAttention(n_f[i]),
+                    MemBlock(n_f[i], n_f[i]),
+                    SpatialLinearAttention(n_f[i]),
+                    MemBlock(n_f[i], n_f[i]),
+                    SpatialLinearAttention(n_f[i]),
+                ])
+            else:
+                dec_layers.extend([
+                    MemBlock(n_f[i], n_f[i]),
+                    MemBlock(n_f[i], n_f[i]),
+                    MemBlock(n_f[i], n_f[i]),
+                ])
             if residual_shortcut:
                 save_mod = ResidualUpsampleSave()
                 dec_layers.append(save_mod)
