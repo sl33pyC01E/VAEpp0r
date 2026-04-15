@@ -26,41 +26,213 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.model import MiniVAE
 from core.generator import VAEpp0rGenerator
+from core.discriminator import PatchDiscriminator, hinge_d_loss, hinge_g_loss
+
+
+# -- Haar wavelet helpers ------------------------------------------------------
+
+def haar_down(x):
+    """2x spatial downscale: (B, C, H, W) -> (B, 4C, H/2, W/2). Lossless."""
+    a = x[:, :, 0::2, 0::2]
+    b = x[:, :, 0::2, 1::2]
+    c = x[:, :, 1::2, 0::2]
+    d = x[:, :, 1::2, 1::2]
+    ll = (a + b + c + d) * 0.5
+    lh = (a - b + c - d) * 0.5
+    hl = (a + b - c - d) * 0.5
+    hh = (a - b - c + d) * 0.5
+    return torch.cat([ll, lh, hl, hh], dim=1)
+
+def haar_up(x):
+    """2x spatial upscale: (B, 4C, H, W) -> (B, C, H*2, W*2). Lossless inverse."""
+    C = x.shape[1] // 4
+    ll, lh, hl, hh = x[:, 0*C:1*C], x[:, 1*C:2*C], x[:, 2*C:3*C], x[:, 3*C:4*C]
+    a = (ll + lh + hl + hh) * 0.5
+    b = (ll - lh + hl - hh) * 0.5
+    c = (ll + lh - hl - hh) * 0.5
+    d = (ll - lh - hl + hh) * 0.5
+    B, Ch, H, W = a.shape
+    out = torch.zeros(B, Ch, H * 2, W * 2, device=x.device, dtype=x.dtype)
+    out[:, :, 0::2, 0::2] = a
+    out[:, :, 0::2, 1::2] = b
+    out[:, :, 1::2, 0::2] = c
+    out[:, :, 1::2, 1::2] = d
+    return out
+
+def haar_down_n(x, n):
+    for _ in range(n):
+        x = haar_down(x)
+    return x
+
+def haar_up_n(x, n):
+    for _ in range(n):
+        x = haar_up(x)
+    return x
+
+
+# -- Chunked inference (no-grad, for preview only) -----------------------------
+
+_CHUNK_SIZE = 24
+
+@torch.no_grad()
+def _chunked_vae_inference(model, x, amp_dtype=torch.bfloat16):
+    T = x.shape[1]
+    trim = getattr(model, 'frames_to_trim', 0)
+    if T <= _CHUNK_SIZE:
+        with torch.amp.autocast("cuda", dtype=amp_dtype):
+            recon, latent = model(x)
+        return recon, latent
+    all_recon = []
+    all_latent = []
+    output_per_chunk = _CHUNK_SIZE - trim
+    target_len = T - trim
+    chunk_start = 0
+    collected = 0
+    while chunk_start < T and collected < target_len:
+        chunk_end = min(chunk_start + _CHUNK_SIZE, T)
+        chunk = x[:, chunk_start:chunk_end]
+        if chunk.shape[1] < model.t_downscale:
+            break
+        with torch.amp.autocast("cuda", dtype=amp_dtype):
+            rc, lat = model(chunk)
+        need = target_len - collected
+        keep = min(rc.shape[1], need)
+        all_recon.append(rc[:, :keep].float().cpu())
+        all_latent.append(lat.float().cpu())
+        collected += keep
+        del rc, lat
+        torch.cuda.empty_cache()
+        if chunk_end >= T or collected >= target_len:
+            break
+        chunk_start += output_per_chunk
+    return torch.cat(all_recon, dim=1), torch.cat(all_latent, dim=1)
 
 
 # -- Preview -------------------------------------------------------------------
 
+def _probe_fps(path):
+    """Return video fps as float, default 30 on failure."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate",
+             "-of", "csv=p=0", path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        s = r.stdout.decode().strip()
+        num, den = s.split("/")
+        return float(num) / float(den)
+    except Exception:
+        return 30.0
+
+
+def _decode_video_frames(path, frame_skip, n_frames, W, H):
+    """Decode n_frames from path starting at frame_skip. Returns list of HxWx3 uint8 arrays."""
+    fps = _probe_fps(path)
+    seek_s = frame_skip / fps
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error",
+         "-i", path,
+         "-ss", str(seek_s),
+         "-vf", f"scale={W}:{H}",
+         "-vframes", str(n_frames),
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    err = result.stderr.decode(errors="replace").strip()
+    if err:
+        print(f"  ffmpeg decode: {err}", flush=True)
+    raw = result.stdout
+    frame_bytes = H * W * 3
+    return [
+        np.frombuffer(raw[i*frame_bytes:(i+1)*frame_bytes], dtype=np.uint8).reshape(H, W, 3)
+        for i in range(len(raw) // frame_bytes)
+    ]
+
+
 @torch.no_grad()
-def save_preview(model, gen, logdir, step, device, amp_dtype, T=8,
-                  preview_image=None, preview_frame_skip=0):
-    """Save GT | Recon side-by-side mp4 video."""
+def save_preview(model, gen, logdir, step, device, amp_dtype, T=8, preview_T=None,
+                  preview_image=None, preview_frame_skip=0, haar_rounds=0):
+    """Save preview mp4 matching static train layout:
+    reference (GT|Recon) scaled to synth grid width on top, synth clips grid below.
+    preview_T: frames to use for preview clips (defaults to T if None).
+    """
     try:
         model.eval()
-        clips = gen.generate_sequence(2, T=T)  # (2, T, 3, H, W)
-        x = clips.to(device)
+        from PIL import Image as _PIL
+        H, W = gen.H, gen.W
+        cell_w = W * 2 + 4
+        sep_v  = np.full((H, 4, 3), 14, dtype=np.uint8)
+        trim   = getattr(model, 'frames_to_trim', 0)
+        pT     = preview_T if preview_T else T
 
-        with torch.amp.autocast("cuda", dtype=amp_dtype):
-            recon, _ = model(x)
+        # -- Synthetic: 2 clips side by side --
+        with torch.random.fork_rng():
+            torch.manual_seed(step + int(time.time()) % 100000)
+            clips = gen.generate_sequence(2, T=pT)  # (2, T, 3, H, W)
+        clips = clips.to(device)
+        if haar_rounds > 0:
+            x = torch.stack([haar_down_n(clips[:, t], haar_rounds)
+                              for t in range(pT)], dim=1)
+        else:
+            x = clips
+        recon, _ = _chunked_vae_inference(model, x, amp_dtype=amp_dtype)
+        T_out  = recon.shape[1]
+        hH = H // (2 ** haar_rounds)
+        hW = W // (2 ** haar_rounds)
+        if haar_rounds > 0:
+            syn_gt_raw = clips[:, trim:trim + T_out]   # (2, T_out, 3, H, W) — original RGB
+            syn_rc_raw = torch.stack([haar_up_n(recon[:, t, :, :hH, :hW], haar_rounds)
+                                       for t in range(T_out)], dim=1).clamp(0, 1)
+            syn_gt = syn_gt_raw[:, :, :3, :H, :W].float().cpu().numpy()
+            syn_rc = syn_rc_raw[:, :, :3, :H, :W].float().cpu().numpy()
+        else:
+            syn_gt = clips[:, trim:trim + T_out, :3, :H, :W].float().cpu().numpy()
+            syn_rc = recon[:, :, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
+        T_show = T_out
+        del recon, x, clips
 
-        T_out = recon.shape[1]
-        T_in = x.shape[1]
-        T_show = min(T_out, T_in)
-        gt = x[:, T_in - T_show:].float().cpu().numpy()
-        rc = recon[:, T_out - T_show:].clamp(0, 1).float().cpu().numpy()
+        syn_w = cell_w * 2 + 2
+        gap_v = np.full((H, 2, 3), 14, dtype=np.uint8)
 
-        del recon, x
+        # -- Reference clip --
+        ref_gt = None
+        ref_rc = None
+        if preview_image and os.path.exists(preview_image):
+            ref_frames = _decode_video_frames(preview_image, preview_frame_skip or 0, pT, W, H)
+            if len(ref_frames) < 2:
+                print(f"  ref: only {len(ref_frames)} frames decoded", flush=True)
+            else:
+                ref_arr = np.stack(ref_frames).astype(np.float32) / 255.0
+                ref_rgb = torch.from_numpy(ref_arr).permute(0, 3, 1, 2).to(device)  # (T, 3, H, W)
+                if haar_rounds > 0:
+                    ref_t = torch.stack([haar_down_n(ref_rgb[t].unsqueeze(0), haar_rounds).squeeze(0)
+                                         for t in range(len(ref_frames))], dim=0).unsqueeze(0)
+                else:
+                    ref_t = ref_rgb.unsqueeze(0)  # (1, T, 3, H, W)
+                ref_recon, _ = _chunked_vae_inference(model, ref_t, amp_dtype=amp_dtype)
+                T_r_out = ref_recon.shape[1]
+                if haar_rounds > 0:
+                    ref_gt = ref_rgb[trim:trim + T_r_out, :3, :H, :W].float().cpu().numpy()
+                    ref_rc_t = torch.stack([haar_up_n(ref_recon[0, t, :, :hH, :hW].unsqueeze(0), haar_rounds)
+                                             for t in range(T_r_out)], dim=0)
+                    ref_rc = ref_rc_t[:, 0, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
+                else:
+                    ref_gt = ref_t[0, trim:trim + T_r_out, :3, :H, :W].float().cpu().numpy()
+                    ref_rc = ref_recon[0, :, :3, :H, :W].clamp(0, 1).numpy()
+                del ref_t, ref_recon
+                T_show = min(T_show, T_r_out)
+
         model.train()
 
-        H, W = gen.H, gen.W
-        sep = np.full((H, 4, 3), 14, dtype=np.uint8)
-        hsep = np.full((4, W * 2 + 4, 3), 14, dtype=np.uint8)
+        # -- Compute frame dimensions: scale ref to syn_w (same logic as static train) --
+        has_ref    = ref_gt is not None
+        scale      = syn_w / cell_w
+        ref_h      = int(H * scale)
+        frame_w    = syn_w
+        frame_h    = (ref_h + 6 + H) if has_ref else H
 
         stepped = os.path.join(logdir, f"preview_{step:06d}.mp4")
-        latest = os.path.join(logdir, "preview_latest.mp4")
-
+        latest  = os.path.join(logdir, "preview_latest.mp4")
         for out_path in [stepped, latest]:
-            frame_w = W * 2 + 4
-            frame_h = H * 2 + 4
             cmd = ["ffmpeg", "-y", "-v", "quiet",
                    "-f", "rawvideo", "-pix_fmt", "rgb24",
                    "-s", f"{frame_w}x{frame_h}", "-r", "30",
@@ -70,84 +242,35 @@ def save_preview(model, gen, logdir, step, device, amp_dtype, T=8,
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
             try:
                 for t in range(T_show):
-                    # Clip 0: GT | Recon (top row)
-                    g0 = (gt[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                    r0 = (rc[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                    top = np.concatenate([g0, sep, r0], axis=1)
-
-                    # Clip 1: GT | Recon (bottom row)
-                    g1 = (gt[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                    r1 = (rc[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                    bot = np.concatenate([g1, sep, r1], axis=1)
-
-                    frame = np.concatenate([top, hsep, bot], axis=0)
-                    proc.stdin.write(frame.tobytes())
-
+                    rows = []
+                    if has_ref:
+                        g = (ref_gt[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        r = (ref_rc[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        ref_cell = np.concatenate([g, sep_v, r], axis=1)  # (H, cell_w, 3)
+                        ref_scaled = np.array(_PIL.fromarray(ref_cell).resize(
+                            (syn_w, ref_h), _PIL.BILINEAR))
+                        rows.append(ref_scaled)
+                        rows.append(np.full((6, syn_w, 3), 14, dtype=np.uint8))
+                    g0 = (syn_gt[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    r0 = (syn_rc[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    g1 = (syn_gt[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    r1 = (syn_rc[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    synth_row = np.concatenate([
+                        g0, sep_v, r0, gap_v, g1, sep_v, r1
+                    ], axis=1)
+                    rows.append(synth_row)
+                    proc.stdin.write(np.concatenate(rows, axis=0).tobytes())
                 proc.stdin.close()
                 proc.wait()
             except Exception:
-                try:
-                    proc.stdin.close()
-                except Exception:
-                    pass
+                try: proc.stdin.close()
+                except Exception: pass
                 proc.kill()
                 proc.wait()
                 raise
 
-        print(f"  preview: {stepped} ({T_show} frames)", flush=True)
-
-        # -- Reference video preview (MP4) --
-        if preview_image and os.path.exists(preview_image):
-            try:
-                import cv2
-                cap = cv2.VideoCapture(preview_image)
-                frame_skip = preview_frame_skip if preview_frame_skip else 0
-                # Skip frames
-                for _ in range(frame_skip):
-                    cap.read()
-                ref_frames = []
-                for _ in range(T_show):
-                    ret, frm = cap.read()
-                    if not ret:
-                        break
-                    frm = cv2.cvtColor(frm, cv2.COLOR_BGR2RGB)
-                    frm = cv2.resize(frm, (W, H))
-                    ref_frames.append(frm)
-                cap.release()
-
-                if len(ref_frames) >= 2:
-                    ref_arr = np.stack(ref_frames).astype(np.float32) / 255.0
-                    ref_t = torch.from_numpy(ref_arr).permute(0, 3, 1, 2).unsqueeze(0).to(device)
-                    with torch.amp.autocast("cuda", dtype=amp_dtype):
-                        ref_recon, _ = model(ref_t)
-                    T_ref_out = ref_recon.shape[1]
-                    T_ref_in = ref_t.shape[1]
-                    T_ref_show = min(T_ref_out, T_ref_in)
-                    ref_gt = ref_t[0, T_ref_in - T_ref_show:].float().cpu().numpy()
-                    ref_rc = ref_recon[0, T_ref_out - T_ref_show:, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
-
-                    ref_path = os.path.join(logdir, "preview_ref_latest.mp4")
-                    frame_w = W * 2 + 4
-                    cmd = ["ffmpeg", "-y", "-v", "quiet",
-                           "-f", "rawvideo", "-pix_fmt", "rgb24",
-                           "-s", f"{frame_w}x{H}", "-r", "30",
-                           "-i", "pipe:0",
-                           "-c:v", "libx264", "-crf", "18",
-                           "-pix_fmt", "yuv420p", ref_path]
-                    ref_proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-                    for t in range(T_ref_show):
-                        g = (ref_gt[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                        r = (ref_rc[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                        frame = np.concatenate([g, sep, r], axis=1)
-                        ref_proc.stdin.write(frame.tobytes())
-                    ref_proc.stdin.close()
-                    ref_proc.wait()
-                    print(f"  ref preview: {ref_path} ({T_ref_show} frames)", flush=True)
-                    del ref_t, ref_recon
-            except ImportError:
-                print("  ref preview skipped (pip install opencv-python)", flush=True)
-            except Exception as ref_e:
-                print(f"  ref preview failed: {ref_e}", flush=True)
+        ref_note = " +ref" if has_ref else ""
+        print(f"  preview: {stepped} ({T_show} frames{ref_note})", flush=True)
 
     except Exception as e:
         import traceback
@@ -184,16 +307,37 @@ def train(args):
     enc_ch_str = args.enc_ch
     dec_ch = tuple(int(x) for x in args.dec_ch.split(","))
     latent_ch = args.latent_ch
+    enc_time_str = args.enc_time
+    dec_time_str = args.dec_time
+    haar_mode = getattr(args, 'haar', 'none')
     if args.resume:
         _ckpt_peek = torch.load(args.resume, map_location="cpu", weights_only=False)
         _cfg = _ckpt_peek.get("config", {})
         enc_ch_str = _cfg.get("encoder_channels", enc_ch_str)
-        latent_ch = _cfg.get("latent_channels", args.latent_ch)
+        latent_ch = _cfg.get("latent_channels", latent_ch)
         dec_ch_str = _cfg.get("decoder_channels", args.dec_ch)
         if isinstance(dec_ch_str, str):
             dec_ch = tuple(int(x) for x in dec_ch_str.split(","))
         elif isinstance(dec_ch_str, (list, tuple)):
             dec_ch = tuple(dec_ch_str)
+        if _cfg.get("encoder_time_downscale") is not None:
+            enc_time_str = str(_cfg["encoder_time_downscale"])
+        if _cfg.get("decoder_time_upscale") is not None:
+            dec_time_str = str(_cfg["decoder_time_upscale"])
+        if _cfg.get("residual_shortcut") is not None:
+            args.residual_shortcut = bool(_cfg["residual_shortcut"])
+        if _cfg.get("use_attention") is not None:
+            args.use_attention = bool(_cfg["use_attention"])
+        if _cfg.get("use_groupnorm") is not None:
+            args.use_groupnorm = bool(_cfg["use_groupnorm"])
+        # Haar: backward compat (old checkpoints stored bool)
+        _haar_raw = _cfg.get("haar", haar_mode)
+        if _haar_raw is True:
+            haar_mode = '2x'
+        elif _haar_raw is False or _haar_raw is None:
+            haar_mode = 'none'
+        else:
+            haar_mode = str(_haar_raw)
         del _ckpt_peek
     # Parse encoder channels
     if isinstance(enc_ch_str, int):
@@ -205,11 +349,23 @@ def train(args):
     else:
         enc_ch = int(enc_ch_str)
     n_stages = len(dec_ch)
+    # Haar config
+    if haar_mode is True:
+        haar_mode = '2x'
+    elif not haar_mode or haar_mode is False:
+        haar_mode = 'none'
+    haar_rounds = {'none': 0, '2x': 1, '4x': 2}.get(haar_mode, 0)
+    haar_ch_mult = 4 ** haar_rounds
+    haar_spatial_mult = 2 ** haar_rounds
+    # vae_in_ch is always derived from haar_rounds — static checkpoints save image_channels=3 (RGB), not haar-expanded
+    vae_in_ch = 3 * haar_ch_mult
+    if haar_rounds > 0:
+        print(f"Haar {haar_mode}: 3ch -> {vae_in_ch}ch ({haar_spatial_mult}x spatial pre-compression)")
     # Parse temporal config
     enc_t = tuple(x.strip().lower() in ("true", "1", "yes")
-                  for x in args.enc_time.split(","))
+                  for x in enc_time_str.split(","))
     dec_t = tuple(x.strip().lower() in ("true", "1", "yes")
-                  for x in args.dec_time.split(","))
+                  for x in dec_time_str.split(","))
     assert len(enc_t) == n_stages, \
         f"--enc-time length {len(enc_t)} != {n_stages} stages"
     assert len(dec_t) == n_stages, \
@@ -217,18 +373,21 @@ def train(args):
 
     model = MiniVAE(
         latent_channels=latent_ch,
-        image_channels=3,
-        output_channels=3,
+        image_channels=vae_in_ch,
+        output_channels=vae_in_ch,
         encoder_channels=enc_ch,
         decoder_channels=dec_ch,
         encoder_time_downscale=enc_t,
         decoder_time_upscale=dec_t,
         residual_shortcut=getattr(args, 'residual_shortcut', False),
+        use_attention=getattr(args, 'use_attention', False),
+        use_groupnorm=getattr(args, 'use_groupnorm', False),
     ).to(device)
     if args.grad_checkpoint:
         model.use_checkpoint = True
     pc = model.param_count()
-    print(f"MiniVAE (3ch, temporal 4x): {pc['total']:,} params"
+    spatial = 2 ** n_stages * haar_spatial_mult
+    print(f"MiniVAE ({vae_in_ch}ch, {spatial}x spatial): {pc['total']:,} params"
           f"{', grad-checkpoint' if args.grad_checkpoint else ''}")
     print(f"  t_downscale={model.t_downscale}, t_upscale={model.t_upscale}, "
           f"frames_to_trim={model.frames_to_trim}")
@@ -262,6 +421,17 @@ def train(args):
           f"T={args.T}, pool={gen.motion_pool_stats()}, "
           f"disco={gen.disco_quadrant}")
 
+    # -- PatchGAN discriminator --
+    disc = None
+    opt_disc = None
+    if args.w_gan > 0:
+        disc = PatchDiscriminator(in_ch=3, nf=args.disc_nf).to(device)
+        opt_disc = torch.optim.Adam(disc.parameters(), lr=float(args.lr),
+                                    betas=(0.5, 0.999))
+        pc_d = sum(p.numel() for p in disc.parameters())
+        print(f"PatchGAN: nf={args.disc_nf}, {pc_d:,} params, "
+              f"w_gan={args.w_gan}, start_step={args.gan_start}")
+
     # -- LPIPS --
     lpips_fn = None
     if args.w_lpips > 0:
@@ -288,22 +458,50 @@ def train(args):
         if "model" in ckpt:
             src_sd = ckpt["model"]
             target_sd = model.state_dict()
-            loaded, skipped = 0, 0
+            loaded, converted, skipped = 0, 0, 0
             for k, v in src_sd.items():
-                if k in target_sd and v.shape == target_sd[k].shape:
+                if k not in target_sd:
+                    skipped += 1
+                    continue
+                t = target_sd[k]
+                if v.shape == t.shape:
                     target_sd[k] = v
                     loaded += 1
+                elif v.ndim == 4 and t.ndim == 4:
+                    # TPool: (n_f, n_f, 1, 1) -> (n_f, 2*n_f, 1, 1)
+                    if t.shape[0] == v.shape[0] and t.shape[1] == v.shape[1] * 2:
+                        t2 = torch.zeros_like(t)
+                        t2[:, :v.shape[1]] = v
+                        target_sd[k] = t2
+                        converted += 1
+                    # TGrow: (n_f, n_f, 1, 1) -> (2*n_f, n_f, 1, 1)
+                    elif t.shape[1] == v.shape[1] and t.shape[0] == v.shape[0] * 2:
+                        t2 = torch.zeros_like(t)
+                        t2[:v.shape[0]] = v
+                        t2[v.shape[0]:] = v
+                        target_sd[k] = t2
+                        converted += 1
+                    else:
+                        skipped += 1
                 else:
                     skipped += 1
+                    print(f"  Skipped: {k} src={list(v.shape)} dst={list(target_sd[k].shape) if k in target_sd else 'missing'}")
             model.load_state_dict(target_sd)
-            print(f"  Loaded {loaded} layers, {skipped} skipped "
-                  f"(size mismatch or new)")
+            print(f"  Loaded {loaded} layers, {converted} converted "
+                  f"(TPool/TGrow), {skipped} skipped")
             global_step = ckpt.get("global_step", 0)
             if not args.fresh_opt and ckpt.get("optimizer"):
                 try:
                     opt.load_state_dict(ckpt["optimizer"])
                 except Exception:
                     print("  Fresh optimizer (mismatch)")
+            if disc is not None and ckpt.get("discriminator"):
+                try:
+                    disc.load_state_dict(ckpt["discriminator"])
+                    if not args.fresh_opt and ckpt.get("optimizer_disc"):
+                        opt_disc.load_state_dict(ckpt["optimizer_disc"])
+                except Exception:
+                    print("  Fresh discriminator (mismatch)")
         else:
             model.load_state_dict(ckpt, strict=False)
         print(f"Resumed from {args.resume} at step {global_step}")
@@ -336,10 +534,32 @@ def train(args):
     gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
     accum = args.grad_accum
 
+    # -- Temporal warmup: freeze spatial weights, train only TPool/TGrow/MemBlock --
+    _temporal_param_names = set()
+    for _mname, _mod in model.named_modules():
+        if type(_mod).__name__ in ("TPool", "TGrow", "MemBlock"):
+            for _pname, _ in _mod.named_parameters(recurse=True):
+                _full = f"{_mname}.{_pname}" if _mname else _pname
+                _temporal_param_names.add(_full)
+
+    _in_warmup = args.warmup_steps > 0 and global_step < args.warmup_steps
+    if _in_warmup:
+        for _n, _p in model.named_parameters():
+            _p.requires_grad_(_n in _temporal_param_names)
+        _warmup_params = [p for p in model.parameters() if p.requires_grad]
+        opt = torch.optim.AdamW(_warmup_params, lr=float(args.lr), weight_decay=0.01)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=args.total_steps, eta_min=float(args.lr) * 0.01,
+            last_epoch=global_step - 1 if global_step > 0 else -1)
+        _steps_left = args.warmup_steps - global_step
+        print(f"Warmup: spatial frozen, training {len(_warmup_params)} temporal param tensors "
+              f"({_steps_left} steps remaining)")
+
     print(f"Steps: {args.total_steps}, LR: {args.lr}, "
           f"Batch: {args.batch_size}, T: {args.T}"
           f"{f', accum={accum}' if accum > 1 else ''}"
-          f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}")
+          f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}"
+          f"{f', warmup={args.warmup_steps}' if args.warmup_steps > 0 else ''}")
     print(f"Weights: mse={args.w_mse} lpips={args.w_lpips} "
           f"temporal={args.w_temporal}")
     print(f"Precision: {args.precision}, Device: {device}")
@@ -355,8 +575,17 @@ def train(args):
         steps_k = f"{step // 1000}k" if step >= 1000 else str(step)
         return f"vae-3ch-lc{latent_ch}-ec{ec_str}-dc{dc_str}-S{spatial}x-T{temporal}x-{steps_k}.pt"
 
+    # Glob pattern scoped to THIS run only — never touch other runs' checkpoints
+    _ec_str = ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else str(enc_ch)
+    _dc_str = ",".join(str(x) for x in dec_ch)
+    _n_stages = len(dec_ch)
+    _spatial = 2 ** _n_stages
+    _t_down = sum(1 for x in enc_t if x)
+    _temporal = 2 ** _t_down if _t_down > 0 else 1
+    _run_glob = f"vae-3ch-lc{latent_ch}-ec{_ec_str}-dc{_dc_str}-S{_spatial}x-T{_temporal}x-*.pt"
+
     def _make_checkpoint():
-        return {
+        d = {
             "model": model.state_dict(),
             "optimizer": opt.state_dict(),
             "scheduler": sched.state_dict(),
@@ -370,16 +599,27 @@ def train(args):
                 "decoder_channels": ",".join(str(x) for x in dec_ch),
                 "encoder_time_downscale": ",".join(str(x) for x in enc_t),
                 "decoder_time_upscale": ",".join(str(x) for x in dec_t),
+                "residual_shortcut": getattr(args, 'residual_shortcut', False),
+                "use_attention": getattr(args, 'use_attention', False),
+                "use_groupnorm": getattr(args, 'use_groupnorm', False),
+                "haar": haar_mode,
                 "temporal": True,
                 "T": args.T,
                 "synthyper_stage": 2,
             },
         }
+        if disc is not None:
+            d["discriminator"] = disc.state_dict()
+            d["optimizer_disc"] = opt_disc.state_dict()
+        return d
 
     # -- Initial preview --
     preview_image = getattr(args, 'preview_image', None)
     save_preview(model, gen, str(logdir), global_step, device, amp_dtype,
-                 args.T, preview_image=preview_image)
+                 args.T, preview_T=getattr(args, 'preview_T', None),
+                 preview_image=preview_image,
+                 preview_frame_skip=getattr(args, 'preview_frame_skip', 0),
+                 haar_rounds=haar_rounds)
 
     # -- Loop --
     t0 = time.time()
@@ -397,8 +637,13 @@ def train(args):
             break
 
         model.train()
+        if disc is not None:
+            disc.train()
         opt.zero_grad(set_to_none=True)
         losses = {}
+
+        _d_real = None
+        _d_fake = None
 
         for _ai in range(accum):
             # Sample from motion pool (fast) or generate fresh (slow)
@@ -412,26 +657,34 @@ def train(args):
                 clips = torch.cat(chunks)
             else:
                 clips = gen.generate_from_pool(args.batch_size)  # (B, T, 3, H, W)
-            x = clips.to(device)
+            clips = clips.to(device)
+            if haar_rounds > 0:
+                B, T, C, H, W = clips.shape
+                x = torch.stack([haar_down_n(clips[:, t], haar_rounds)
+                                  for t in range(T)], dim=1)
+            else:
+                x = clips
 
             with torch.amp.autocast("cuda", dtype=amp_dtype):
                 recon, latent = model(x)
 
-                # Align temporal
+                # Align temporal and crop spatial to input dims
                 T_out = recon.shape[1]
                 T_in = x.shape[1]
                 T_match = min(T_out, T_in)
                 gt = x[:, T_in - T_match:]
-                rc = recon[:, T_out - T_match:]
+                hH = args.H // haar_spatial_mult
+                hW = args.W // haar_spatial_mult
+                rc = recon[:, T_out - T_match:, :, :hH, :hW]
 
                 # Reconstruction loss
                 total = torch.tensor(0.0, device=device)
                 if args.w_l1 > 0:
-                    l1 = F.l1_loss(rc, gt)
+                    l1 = F.l1_loss(rc, gt[:, :, :, :hH, :hW])
                     total = total + args.w_l1 * l1
                     losses["l1"] = losses.get("l1", 0) + l1.item() / accum
                 if args.w_mse > 0:
-                    mse = F.mse_loss(rc, gt)
+                    mse = F.mse_loss(rc, gt[:, :, :, :hH, :hW])
                     total = total + args.w_mse * mse
                     losses["mse"] = losses.get("mse", 0) + mse.item() / accum
 
@@ -443,17 +696,40 @@ def train(args):
                     total = total + args.w_temporal * temp
                     losses["temp"] = losses.get("temp", 0) + temp.item() / accum
 
+                # LPIPS + GAN: need RGB — decode haar once for both
+                B_rc = rc.shape[0]
+                if haar_rounds > 0:
+                    rc_2d = rc.reshape(B_rc * T_match, rc.shape[2], hH, hW)
+                    fake_2d = rc_2d
+                    for _ in range(haar_rounds):
+                        fake_2d = haar_up(fake_2d)
+                    rc_rgb = fake_2d[:, :3, :args.H, :args.W].reshape(B_rc, T_match, 3, args.H, args.W)
+                    gt_rgb = clips[:, T_in - T_match:, :3, :args.H, :args.W]
+                else:
+                    rc_rgb = rc[:, :, :3, :args.H, :args.W]
+                    gt_rgb = gt[:, :, :3, :args.H, :args.W]
+
                 # LPIPS (per-frame, on RGB)
                 if lpips_fn is not None:
-                    BT = rc.shape[0] * T_match
-                    rc_lp = rc.reshape(BT, 3, args.H, args.W) * 2 - 1
-                    gt_lp = gt.reshape(BT, 3, args.H, args.W) * 2 - 1
+                    BT = B_rc * T_match
+                    rc_lp = rc_rgb.reshape(BT, 3, args.H, args.W) * 2 - 1
+                    gt_lp = gt_rgb.reshape(BT, 3, args.H, args.W) * 2 - 1
                     lp_chunks = []
                     for ci in range(0, BT, 4):
                         lp_chunks.append(lpips_fn(rc_lp[ci:ci+4], gt_lp[ci:ci+4]))
                     lp = torch.cat(lp_chunks, 0).mean()
                     total = total + args.w_lpips * lp
                     losses["lpips"] = losses.get("lpips", 0) + lp.item() / accum
+
+                # GAN generator loss (per-frame discriminator)
+                if disc is not None and global_step >= args.gan_start:
+                    BT = B_rc * T_match
+                    fake_bt = rc_rgb.reshape(BT, 3, args.H, args.W)
+                    g_loss = hinge_g_loss(disc(fake_bt * 2 - 1))
+                    total = total + args.w_gan * g_loss
+                    losses["g"] = losses.get("g", 0) + g_loss.item() / accum
+                    _d_real = gt_rgb.reshape(BT, 3, args.H, args.W).detach()
+                    _d_fake = fake_bt.detach()
 
             if total.dim() > 0:
                 total = total.mean()
@@ -466,7 +742,28 @@ def train(args):
         scaler.step(opt)
         scaler.update()
         sched.step()
+
+        # D update (once per step, after G)
+        if disc is not None and global_step >= args.gan_start and _d_real is not None:
+            opt_disc.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                d_loss = hinge_d_loss(disc(_d_real * 2 - 1), disc(_d_fake * 2 - 1))
+            d_loss.backward()
+            opt_disc.step()
+            losses["d"] = d_loss.item()
+
         global_step += 1
+
+        # -- Warmup -> full training transition --
+        if args.warmup_steps > 0 and global_step == args.warmup_steps:
+            print("Warmup complete — unfreezing all parameters", flush=True)
+            for _p in model.parameters():
+                _p.requires_grad_(True)
+            opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr),
+                                    weight_decay=0.01)
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt, T_max=args.total_steps - global_step,
+                eta_min=float(args.lr) * 0.01)
 
         # -- Log --
         if global_step % args.log_every == 0:
@@ -486,8 +783,10 @@ def train(args):
         if global_step % args.preview_every == 0:
             save_preview(model, gen, str(logdir), global_step,
                          device, amp_dtype, args.T,
+                         preview_T=getattr(args, 'preview_T', None),
                          preview_image=preview_image,
-                 preview_frame_skip=getattr(args, 'preview_frame_skip', 0))
+                         preview_frame_skip=getattr(args, 'preview_frame_skip', 0),
+                         haar_rounds=haar_rounds)
 
         # -- Checkpoint --
         if global_step % args.save_every == 0:
@@ -497,7 +796,7 @@ def train(args):
             torch.save(d, logdir / "latest.pt")
             print(f"  saved {named}", flush=True)
 
-            ckpts = sorted([f for f in logdir.glob("*.pt")
+            ckpts = sorted([f for f in logdir.glob(_run_glob)
                            if f.name != "latest.pt"],
                            key=lambda x: x.stat().st_mtime)
             while len(ckpts) > 10:
@@ -540,6 +839,12 @@ def main():
     p.add_argument("--w-mse", type=float, default=0.0)
     p.add_argument("--w-lpips", type=float, default=0.5)
     p.add_argument("--w-temporal", type=float, default=2.0)
+    p.add_argument("--w-gan", type=float, default=0.0,
+                   help="PatchGAN adversarial loss weight (0=disabled)")
+    p.add_argument("--gan-start", type=int, default=1000,
+                   help="Step to start GAN training (let recon stabilize first)")
+    p.add_argument("--disc-nf", type=int, default=64,
+                   help="PatchGAN base channel count")
     p.add_argument("--bank-size", type=int, default=5000)
     p.add_argument("--n-layers", type=int, default=128)
     p.add_argument("--pool-size", type=int, default=200)
@@ -553,8 +858,17 @@ def main():
                    help="Gradient checkpointing (trade compute for memory)")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode")
+    p.add_argument("--haar", default="none", choices=["none", "2x", "4x"],
+                   help="Haar wavelet pre-compression (none/2x/4x)")
     p.add_argument("--residual-shortcut", action="store_true",
                    help="DC-AE style residual shortcuts (pixel_unshuffle/shuffle bypasses)")
+    p.add_argument("--use-attention", action="store_true",
+                   help="Add linear attention at deepest encoder/decoder stage")
+    p.add_argument("--use-groupnorm", action="store_true",
+                   help="Add GroupNorm inside MemBlock conv layers")
+    p.add_argument("--warmup-steps", type=int, default=500,
+                   help="Steps to train only temporal layers (TPool/TGrow/MemBlock) "
+                        "before unfreezing spatial weights. Set 0 to disable.")
     p.add_argument("--resume", default=None)
     p.add_argument("--fresh-opt", action="store_true")
     p.add_argument("--logdir", default="synthyper_video_logs")
@@ -565,6 +879,8 @@ def main():
                    help="Path to reference video (mp4) for tracking progress")
     p.add_argument("--preview-frame-skip", type=int, default=0,
                    help="Number of frames to skip into the reference video")
+    p.add_argument("--preview-T", type=int, default=None,
+                   help="Preview clip length in frames (default: same as --T)")
     args = p.parse_args()
     train(args)
 

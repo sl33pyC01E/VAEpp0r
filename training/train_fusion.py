@@ -345,6 +345,11 @@ def train(args):
         steps_k = f"{step // 1000}k" if step >= 1000 else str(step)
         return f"fusion-{cpu_out_ch}ch-lc{latent_ch}-ec{ec_str}-dc{dc_str}-{spatial_comp}x-{steps_k}.pt"
 
+    # Glob pattern scoped to THIS run only — never touch other runs' checkpoints
+    _ec_str = ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else str(enc_ch)
+    _dc_str = ",".join(str(x) for x in dec_ch)
+    _run_glob = f"fusion-{cpu_out_ch}ch-lc{latent_ch}-ec{_ec_str}-dc{_dc_str}-{spatial_comp}x-*.pt"
+
     def _make_checkpoint():
         return {
             "model": model.state_dict(),
@@ -497,7 +502,7 @@ def train(args):
             torch.save(d, logdir / "latest.pt")
             print(f"  saved {named}", flush=True)
 
-            ckpts = sorted([f for f in logdir.glob("*.pt")
+            ckpts = sorted([f for f in logdir.glob(_run_glob)
                            if f.name != "latest.pt"],
                            key=lambda x: x.stat().st_mtime)
             while len(ckpts) > 10:

@@ -35,59 +35,169 @@ from core.generator import VAEpp0rGenerator
 from experiments.flatten import FlattenDeflatten
 
 
+# -- Chunked flatten inference (no-grad, for preview only) ---------------------
+
+_CHUNK_SIZE = 24
+
+@torch.no_grad()
+def __chunked_flatten_inference(vae, bottleneck, x, amp_dtype=torch.bfloat16,
+                                encode_fn=None, decode_fn=None):
+    _encode = encode_fn or (lambda c: vae.encode_video(c))
+    _decode = decode_fn or (lambda z: vae.decode_video(z))
+    T = x.shape[1]
+    if T <= _CHUNK_SIZE:
+        with torch.amp.autocast("cuda", dtype=amp_dtype):
+            lat = _encode(x)
+            recon_vae = _decode(lat)
+            B, Tp, C, Hl, Wl = lat.shape
+            lat_flat = lat.reshape(B * Tp, C, Hl, Wl)
+            lat_recon, _ = bottleneck(lat_flat)
+            lat_recon = lat_recon.reshape(B, Tp, C, Hl, Wl)
+            recon_flat = _decode(lat_recon)
+        return recon_vae, recon_flat, lat
+    trim = getattr(vae, 'frames_to_trim', 0)
+    output_per_chunk = _CHUNK_SIZE - trim
+    target_len = T - trim
+    all_vae, all_flat, all_lat = [], [], []
+    chunk_start = 0
+    collected = 0
+    while chunk_start < T and collected < target_len:
+        chunk_end = min(chunk_start + _CHUNK_SIZE, T)
+        chunk = x[:, chunk_start:chunk_end]
+        if chunk.shape[1] < getattr(vae, 't_downscale', 1):
+            break
+        with torch.amp.autocast("cuda", dtype=amp_dtype):
+            lat = _encode(chunk)
+            rc_vae = _decode(lat)
+            B, Tp, C, Hl, Wl = lat.shape
+            lat_f = lat.reshape(B * Tp, C, Hl, Wl)
+            lat_r, _ = bottleneck(lat_f)
+            lat_r = lat_r.reshape(B, Tp, C, Hl, Wl)
+            rc_flat = _decode(lat_r)
+        need = target_len - collected
+        keep = min(rc_vae.shape[1], rc_flat.shape[1], need)
+        all_vae.append(rc_vae[:, :keep].float().cpu())
+        all_flat.append(rc_flat[:, :keep].float().cpu())
+        all_lat.append(lat.float().cpu())
+        collected += keep
+        del rc_vae, rc_flat, lat, lat_r, lat_f
+        torch.cuda.empty_cache()
+        if chunk_end >= T or collected >= target_len:
+            break
+        chunk_start += output_per_chunk
+    return torch.cat(all_vae, dim=1), torch.cat(all_flat, dim=1), \
+           torch.cat(all_lat, dim=1)
+
+
+# -- Preview helpers -----------------------------------------------------------
+
+def _probe_fps(path):
+    """Return video fps as float, default 30 on failure."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate",
+             "-of", "csv=p=0", path],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        s = r.stdout.decode().strip()
+        num, den = s.split("/")
+        return float(num) / float(den)
+    except Exception:
+        return 30.0
+
+
+def _decode_video_frames(path, frame_skip, n_frames, W, H):
+    """Decode n_frames from path starting at frame_skip. Returns list of HxWx3 uint8 arrays."""
+    fps = _probe_fps(path)
+    seek_s = frame_skip / fps
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error",
+         "-i", path,
+         "-ss", str(seek_s),
+         "-vf", f"scale={W}:{H}",
+         "-vframes", str(n_frames),
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    err = result.stderr.decode(errors="replace").strip()
+    if err:
+        print(f"  ffmpeg decode: {err}", flush=True)
+    raw = result.stdout
+    frame_bytes = H * W * 3
+    return [
+        np.frombuffer(raw[i*frame_bytes:(i+1)*frame_bytes], dtype=np.uint8).reshape(H, W, 3)
+        for i in range(len(raw) // frame_bytes)
+    ]
+
+
 # -- Preview (MP4 video) ------------------------------------------------------
 
 @torch.no_grad()
 def save_preview(vae, bottleneck, gen, logdir, step, device, amp_dtype, T=8,
+                  preview_T=None, preview_image=None, preview_frame_skip=0,
                   encode_fn=None, decode_fn=None):
     """Save GT | VAE | Flatten reconstruction as MP4.
-    encode_fn/decode_fn override vae.encode_video/decode_video when provided
-    (e.g. to include FSQ projections in the pipeline)."""
-    _encode = encode_fn or (lambda x: vae.encode_video(x))
-    _decode = decode_fn or (lambda z: vae.decode_video(z))
+    Layout mirrors train_video: reference scaled to syn_w on top, 2 synth clips below.
+    """
     try:
         vae.eval()
         bottleneck.eval()
-        clips = gen.generate_sequence(2, T=T)  # (2, T, 3, H, W)
+        from PIL import Image as _PIL
+        H, W = gen.H, gen.W
+        sep_v = np.full((H, 4, 3), 14, dtype=np.uint8)
+        gap_v = np.full((H, 2, 3), 14, dtype=np.uint8)
+        trim  = getattr(vae, 'frames_to_trim', 0)
+        pT    = preview_T if preview_T else T
+
+        # cell_w = one clip: GT | sep | VAE | sep | Flat
+        cell_w = W * 3 + 8
+        # syn_w = two clips side by side (matches train_video pattern)
+        syn_w  = cell_w * 2 + 2
+
+        # -- Synthetic: 2 clips --
+        with torch.random.fork_rng():
+            torch.manual_seed(step + int(time.time()) % 100000)
+            clips = gen.generate_sequence(2, T=pT)
         x = clips.to(device)
+        recon_vae, recon_flat, _ = _chunked_flatten_inference(
+            vae, bottleneck, x, amp_dtype=amp_dtype,
+            encode_fn=encode_fn, decode_fn=decode_fn)
+        T_out    = min(recon_vae.shape[1], recon_flat.shape[1])
+        T_show   = T_out
+        syn_gt   = x[:, trim:trim + T_out, :3, :H, :W].float().cpu().numpy()
+        syn_vae  = recon_vae[:, :T_out, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
+        syn_flat = recon_flat[:, :T_out, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
+        del recon_vae, recon_flat, x
 
-        with torch.amp.autocast("cuda", dtype=amp_dtype):
-            # Encode (includes FSQ if present)
-            lat = _encode(x)  # (B, T', C, H, W)
+        # -- Reference clip --
+        ref_gt = ref_vae = ref_flat = None
+        if preview_image and os.path.exists(preview_image):
+            ref_frames = _decode_video_frames(preview_image, preview_frame_skip or 0, pT, W, H)
+            if len(ref_frames) < 2:
+                print(f"  ref: only {len(ref_frames)} frames decoded", flush=True)
+            else:
+                ref_arr = np.stack(ref_frames).astype(np.float32) / 255.0
+                ref_t = torch.from_numpy(ref_arr).permute(0, 3, 1, 2).unsqueeze(0).to(device)
+                r_vae, r_flat, _ = _chunked_flatten_inference(
+                    vae, bottleneck, ref_t, amp_dtype=amp_dtype,
+                    encode_fn=encode_fn, decode_fn=decode_fn)
+                T_r    = min(r_vae.shape[1], r_flat.shape[1])
+                ref_gt   = ref_t[0, trim:trim + T_r, :3, :H, :W].float().cpu().numpy()
+                ref_vae  = r_vae[0, :T_r, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
+                ref_flat = r_flat[0, :T_r, :3, :H, :W].clamp(0, 1).float().cpu().numpy()
+                T_show = min(T_show, T_r)
+                del ref_t, r_vae, r_flat
 
-            # VAE-only decode (no bottleneck)
-            recon_vae = _decode(lat)
-
-            # VAE + bottleneck (per-frame)
-            B, Tp, C, Hl, Wl = lat.shape
-            lat_flat = lat.reshape(B * Tp, C, Hl, Wl)
-            lat_recon_flat, _ = bottleneck(lat_flat)
-            lat_recon = lat_recon_flat.reshape(B, Tp, C, Hl, Wl)
-            recon_flat = _decode(lat_recon)
-
-        T_vae = recon_vae.shape[1]
-        T_flat = recon_flat.shape[1]
-        T_in = x.shape[1]
-        T_show = min(T_vae, T_flat, T_in)
-
-        gt = x[:, T_in - T_show:, :3].float().cpu().numpy()
-        rc_vae = recon_vae[:, T_vae - T_show:, :3].clamp(0, 1).float().cpu().numpy()
-        rc_flat = recon_flat[:, T_flat - T_show:, :3].clamp(0, 1).float().cpu().numpy()
-
-        del recon_vae, recon_flat, lat, lat_recon
         bottleneck.train()
 
-        H, W = gen.H, gen.W
-        sep = np.full((H, 4, 3), 14, dtype=np.uint8)
-        hsep_w = W * 3 + 8
-        hsep = np.full((4, hsep_w, 3), 14, dtype=np.uint8)
+        has_ref = ref_gt is not None
+        scale   = syn_w / cell_w
+        ref_h   = int(H * scale)
+        frame_w = syn_w
+        frame_h = (ref_h + 6 + H) if has_ref else H
 
         stepped = os.path.join(logdir, f"preview_{step:06d}.mp4")
-        latest = os.path.join(logdir, "preview_latest.mp4")
-
+        latest  = os.path.join(logdir, "preview_latest.mp4")
         for out_path in [stepped, latest]:
-            frame_w = hsep_w
-            frame_h = H * 2 + 4
             cmd = ["ffmpeg", "-y", "-v", "quiet",
                    "-f", "rawvideo", "-pix_fmt", "rgb24",
                    "-s", f"{frame_w}x{frame_h}", "-r", "30",
@@ -98,24 +208,38 @@ def save_preview(vae, bottleneck, gen, logdir, step, device, amp_dtype, T=8,
             try:
                 for t in range(T_show):
                     rows = []
-                    for b in range(min(2, B)):
-                        g = (gt[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                        v = (rc_vae[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                        f_ = (rc_flat[b, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
-                        row = np.concatenate([g, sep, v, sep, f_], axis=1)
-                        rows.append(row)
-
-                    if len(rows) == 2:
-                        frame = np.concatenate([rows[0], hsep, rows[1]], axis=0)
-                    else:
-                        frame = rows[0]
-                    proc.stdin.write(frame.tobytes())
-            finally:
+                    if has_ref:
+                        g  = (ref_gt[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        v  = (ref_vae[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        f_ = (ref_flat[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                        ref_cell   = np.concatenate([g, sep_v, v, sep_v, f_], axis=1)
+                        ref_scaled = np.array(_PIL.fromarray(ref_cell).resize(
+                            (syn_w, ref_h), _PIL.BILINEAR))
+                        rows.append(ref_scaled)
+                        rows.append(np.full((6, syn_w, 3), 14, dtype=np.uint8))
+                    g0  = (syn_gt[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    v0  = (syn_vae[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    f0  = (syn_flat[0, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    g1  = (syn_gt[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    v1  = (syn_vae[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    f1  = (syn_flat[1, t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                    synth_row = np.concatenate([
+                        g0, sep_v, v0, sep_v, f0, gap_v, g1, sep_v, v1, sep_v, f1
+                    ], axis=1)
+                    rows.append(synth_row)
+                    proc.stdin.write(np.concatenate(rows, axis=0).tobytes())
                 proc.stdin.close()
                 proc.wait()
+            except Exception:
+                try: proc.stdin.close()
+                except Exception: pass
+                proc.kill()
+                proc.wait()
+                raise
 
-        print(f"  preview: {stepped} (GT | VAE | Flatten, {T_show} frames)",
-              flush=True)
+        ref_note = " +ref" if has_ref else ""
+        print(f"  preview: {stepped} (GT|VAE|Flat, {T_show} frames{ref_note})", flush=True)
+
     except Exception as e:
         import traceback
         print(f"  preview failed: {e}", flush=True)
@@ -152,7 +276,14 @@ def train(args):
     vae_config = ckpt.get("config", {})
     ch = vae_config.get("image_channels", 3)
     lat_ch = vae_config.get("latent_channels", 32)
-    enc_ch = vae_config.get("encoder_channels", 64)
+    enc_ch_raw = vae_config.get("encoder_channels", 64)
+    if isinstance(enc_ch_raw, str):
+        enc_ch = tuple(int(x) for x in enc_ch_raw.split(","))
+    elif isinstance(enc_ch_raw, (list, tuple)):
+        enc_ch = tuple(int(x) for x in enc_ch_raw)
+    else:
+        enc_ch = int(enc_ch_raw)
+
     dec_ch_str = vae_config.get("decoder_channels", "256,128,64")
     if isinstance(dec_ch_str, str):
         dec_ch = tuple(int(x) for x in dec_ch_str.split(","))
@@ -161,11 +292,29 @@ def train(args):
     else:
         dec_ch = (256, 128, 64)
 
+    enc_t_raw = vae_config.get("encoder_time_downscale", (True, True, False))
+    dec_t_raw = vae_config.get("decoder_time_upscale", (False, True, True))
+    if isinstance(enc_t_raw, str):
+        enc_t = tuple(x.strip() in ("True", "1") for x in enc_t_raw.split(","))
+    else:
+        enc_t = tuple(bool(x) for x in enc_t_raw)
+    if isinstance(dec_t_raw, str):
+        dec_t = tuple(x.strip() in ("True", "1") for x in dec_t_raw.split(","))
+    else:
+        dec_t = tuple(bool(x) for x in dec_t_raw)
+
+    residual_shortcut = vae_config.get("residual_shortcut", False)
+    use_attention = vae_config.get("use_attention", False)
+    use_groupnorm = vae_config.get("use_groupnorm", False)
+
     vae = MiniVAE(
         latent_channels=lat_ch, image_channels=ch, output_channels=ch,
         encoder_channels=enc_ch, decoder_channels=dec_ch,
-        encoder_time_downscale=(True, True, False),
-        decoder_time_upscale=(False, True, True),
+        encoder_time_downscale=enc_t,
+        decoder_time_upscale=dec_t,
+        residual_shortcut=residual_shortcut,
+        use_attention=use_attention,
+        use_groupnorm=use_groupnorm,
     ).to(device)
 
     src_sd = ckpt["model"] if "model" in ckpt else ckpt
@@ -307,16 +456,26 @@ def train(args):
 
     def _make_checkpoint():
         return {
+            "model": vae.state_dict(),
             "bottleneck": bottleneck.state_dict(),
             "optimizer": opt.state_dict(),
             "step": step,
             "config": {
-                "latent_channels": lat_C,
+                # VAE arch (so inference tab can build MiniVAE without the original VAE ckpt)
+                "image_channels": ch,
+                "latent_channels": lat_ch,
+                "encoder_channels": ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else enc_ch,
+                "decoder_channels": ",".join(str(x) for x in dec_ch),
+                "encoder_time_downscale": ",".join(str(x) for x in enc_t),
+                "decoder_time_upscale": ",".join(str(x) for x in dec_t),
+                "residual_shortcut": residual_shortcut,
+                "use_attention": use_attention,
+                "use_groupnorm": use_groupnorm,
+                # Bottleneck
                 "bottleneck_channels": args.bottleneck_ch,
                 "spatial_h": lat_H,
                 "spatial_w": lat_W,
                 "walk_order": args.walk_order,
-                "vae_ckpt": args.vae_ckpt,
                 "temporal": True,
                 "T": args.T,
             },
@@ -324,7 +483,11 @@ def train(args):
 
     # Initial preview
     save_preview(vae, bottleneck, gen, str(logdir), start_step, device,
-                 amp_dtype, args.T, encode_fn=encode_latent, decode_fn=decode_latent)
+                 amp_dtype, args.T,
+                 preview_T=getattr(args, 'preview_T', None),
+                 preview_image=getattr(args, 'preview_image', None),
+                 preview_frame_skip=getattr(args, 'preview_frame_skip', 0),
+                 encode_fn=encode_latent, decode_fn=decode_latent)
 
     # -- Loop --
     t0 = time.time()
@@ -419,6 +582,9 @@ def train(args):
         if step % args.preview_every == 0:
             save_preview(vae, bottleneck, gen, str(logdir), step,
                          device, amp_dtype, args.T,
+                         preview_T=getattr(args, 'preview_T', None),
+                         preview_image=getattr(args, 'preview_image', None),
+                         preview_frame_skip=getattr(args, 'preview_frame_skip', 0),
                          encode_fn=encode_latent, decode_fn=decode_latent)
 
         if step % args.save_every == 0:
@@ -474,6 +640,12 @@ def main():
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=2000)
     p.add_argument("--preview-every", type=int, default=100)
+    p.add_argument("--preview-image", default=None,
+                   help="Path to reference video (mp4) for tracking progress")
+    p.add_argument("--preview-frame-skip", type=int, default=0,
+                   help="Number of frames to skip into the reference video")
+    p.add_argument("--preview-T", type=int, default=None,
+                   help="Preview clip length in frames (default: same as --T)")
     p.add_argument("--resume", default=None,
                    help="Resume from bottleneck checkpoint")
     p.add_argument("--bank-size", type=int, default=5000)

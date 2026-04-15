@@ -412,6 +412,8 @@ class FlattenInferenceTab(tk.Frame):
             g = (gt[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
             v = (rc_vae[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
             f = (rc_flat[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+            v = v[:g.shape[0], :g.shape[1]]
+            f = f[:g.shape[0], :g.shape[1]]
             row = np.concatenate([g, sep, v, sep, f], axis=1)
             rows.append(row)
 
@@ -528,6 +530,30 @@ class FlattenVideoTab(tk.Frame):
                        selectcolor=BG_INPUT, activebackground=BG_PANEL,
                        font=FONT).pack(side="left")
 
+        prev_row = tk.Frame(top, bg=BG_PANEL)
+        prev_row.pack(fill="x", pady=(5, 0))
+        self.preview_vid_var = tk.StringVar(value="")
+        f = tk.Frame(prev_row, bg=BG_PANEL)
+        tk.Label(f, text="Preview video", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        ef = tk.Frame(f, bg=BG_PANEL)
+        tk.Entry(ef, textvariable=self.preview_vid_var, bg=BG_INPUT, fg=FG,
+                 font=FONT, width=40, borderwidth=0,
+                 insertbackground=FG).pack(side="left", fill="x", expand=True)
+        from tkinter import filedialog as _fd
+        make_btn(ef, "Browse",
+                 lambda: self.preview_vid_var.set(
+                     _fd.askopenfilename(
+                         filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv"),
+                                    ("All", "*.*")]) or self.preview_vid_var.get()),
+                 ACCENT, width=7).pack(side="left", padx=(5, 0))
+        ef.pack(fill="x")
+        f.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        f2, self.frame_skip_var = make_spin(prev_row, "Frame skip", default=0)
+        f2.pack(side="left", padx=(0, 10))
+        f3, self.preview_T_var = make_spin(prev_row, "Preview T", default=0)
+        f3.pack(side="left")
+
         btn = tk.Frame(top, bg=BG_PANEL)
         btn.pack(fill="x", pady=(10, 0))
         make_btn(btn, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
@@ -576,6 +602,13 @@ class FlattenVideoTab(tk.Frame):
             cmd.append("--fresh-opt")
         if self.disco_var.get():
             cmd.append("--disco")
+        prev_vid = self.preview_vid_var.get().strip()
+        if prev_vid:
+            cmd += ["--preview-image", prev_vid,
+                    "--preview-frame-skip", str(self.frame_skip_var.get())]
+        prev_T = self.preview_T_var.get()
+        if prev_T > 0:
+            cmd += ["--preview-T", str(prev_T)]
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop(self):
@@ -731,23 +764,37 @@ class FlattenVideoInferenceTab(tk.Frame):
         from experiments.flatten import FlattenDeflatten
 
         try:
-            # Load temporal VAE
             vae_path = self.vae_ckpt.get().strip()
             if not os.path.isabs(vae_path):
                 vae_path = os.path.join(PROJECT_ROOT, vae_path)
             ckpt = torch.load(vae_path, map_location="cpu", weights_only=False)
+
+            # Combined checkpoint has both "model" and "bottleneck" keys
+            combined = "model" in ckpt and "bottleneck" in ckpt
+            vae_ckpt_data = ckpt
+            bn_ckpt_data  = ckpt if combined else None
+
             config = ckpt.get("config", {})
-            ch = config.get("image_channels", 3)
+            ch  = config.get("image_channels", 3)
             lat = config.get("latent_channels", 32)
 
             enc_ch, dec_ch = parse_arch_config(config)
+            enc_t_raw = config.get("encoder_time_downscale", (True, True, False))
+            dec_t_raw = config.get("decoder_time_upscale", (False, True, True))
+            enc_t = tuple(x.strip() in ("True", "1") for x in enc_t_raw.split(",")) \
+                if isinstance(enc_t_raw, str) else tuple(bool(x) for x in enc_t_raw)
+            dec_t = tuple(x.strip() in ("True", "1") for x in dec_t_raw.split(",")) \
+                if isinstance(dec_t_raw, str) else tuple(bool(x) for x in dec_t_raw)
             self.vae = MiniVAE(
                 latent_channels=lat, image_channels=ch, output_channels=ch,
                 encoder_channels=enc_ch, decoder_channels=dec_ch,
-                encoder_time_downscale=(True, True, False),
-                decoder_time_upscale=(False, True, True),
+                encoder_time_downscale=enc_t,
+                decoder_time_upscale=dec_t,
+                residual_shortcut=config.get("residual_shortcut", False),
+                use_attention=config.get("use_attention", False),
+                use_groupnorm=config.get("use_groupnorm", False),
             ).cuda()
-            src_sd = ckpt["model"] if "model" in ckpt else ckpt
+            src_sd = vae_ckpt_data["model"]
             target_sd = self.vae.state_dict()
             loaded = 0
             for k, v in src_sd.items():
@@ -765,27 +812,29 @@ class FlattenVideoInferenceTab(tk.Frame):
                 _, _, lat_C, lat_H, lat_W = lat_d.shape
                 del dummy, lat_d
 
-            # Load bottleneck
-            bn_path = self.bn_ckpt.get().strip()
-            if not os.path.isabs(bn_path):
-                bn_path = os.path.join(PROJECT_ROOT, bn_path)
-            bn_ckpt = torch.load(bn_path, map_location="cpu", weights_only=False)
-            bn_cfg = bn_ckpt.get("config", {})
-            bn_ch = bn_cfg.get("bottleneck_channels", 6)
-            walk = bn_cfg.get("walk_order", "raster")
+            # Load bottleneck — from combined ckpt or separate file
+            if not combined:
+                bn_path = self.bn_ckpt.get().strip()
+                if not os.path.isabs(bn_path):
+                    bn_path = os.path.join(PROJECT_ROOT, bn_path)
+                bn_ckpt_data = torch.load(bn_path, map_location="cpu", weights_only=False)
+
+            bn_cfg = bn_ckpt_data.get("config", {})
+            bn_ch  = bn_cfg.get("bottleneck_channels", 6)
+            walk   = bn_cfg.get("walk_order", "raster")
 
             self.bottleneck = FlattenDeflatten(
                 latent_channels=lat_C, bottleneck_channels=bn_ch,
                 spatial_h=lat_H, spatial_w=lat_W, walk_order=walk,
             ).cuda()
-            self.bottleneck.load_state_dict(bn_ckpt["bottleneck"])
+            self.bottleneck.load_state_dict(bn_ckpt_data["bottleneck"])
             self.bottleneck.eval()
 
-            step = bn_ckpt.get("step", "?")
+            step = bn_ckpt_data.get("step", "?")
+            src = "combined" if combined else "separate"
             self.status.config(
-                text=f"VAE: {ch}ch lat={lat} temporal | Bottleneck: "
-                     f"{bn_ch}ch ({lat_C}→{bn_ch}→{lat_C}), step {step}, "
-                     f"walk={walk}, {loaded} VAE weights")
+                text=f"VAE+BN ({src}): {ch}ch lat={lat} | "
+                     f"{bn_ch}ch bottleneck, step {step}, walk={walk}, {loaded} VAE weights")
         except Exception as e:
             self.status.config(text=f"Error: {e}")
 
@@ -925,6 +974,8 @@ class FlattenVideoInferenceTab(tk.Frame):
                 g = (gt[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
                 v = (rc_vae[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
                 f = (rc_flat[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                v = v[:g.shape[0], :g.shape[1]]
+                f = f[:g.shape[0], :g.shape[1]]
                 frame = np.concatenate([g, sep, v, sep, f], axis=1)
                 proc.stdin.write(frame.tobytes())
                 pil = Image.fromarray(frame)
@@ -2035,6 +2086,30 @@ class FlattenVideoFSQTab(tk.Frame):
                        selectcolor=BG_INPUT, activebackground=BG_PANEL,
                        font=FONT).pack(side="left")
 
+        prev_row = tk.Frame(top, bg=BG_PANEL)
+        prev_row.pack(fill="x", pady=(5, 0))
+        self.preview_vid_var = tk.StringVar(value="")
+        f = tk.Frame(prev_row, bg=BG_PANEL)
+        tk.Label(f, text="Preview video", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        ef = tk.Frame(f, bg=BG_PANEL)
+        tk.Entry(ef, textvariable=self.preview_vid_var, bg=BG_INPUT, fg=FG,
+                 font=FONT, width=40, borderwidth=0,
+                 insertbackground=FG).pack(side="left", fill="x", expand=True)
+        from tkinter import filedialog as _fd
+        make_btn(ef, "Browse",
+                 lambda: self.preview_vid_var.set(
+                     _fd.askopenfilename(
+                         filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv"),
+                                    ("All", "*.*")]) or self.preview_vid_var.get()),
+                 ACCENT, width=7).pack(side="left", padx=(5, 0))
+        ef.pack(fill="x")
+        f.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        f2, self.frame_skip_var = make_spin(prev_row, "Frame skip", default=0)
+        f2.pack(side="left", padx=(0, 10))
+        f3, self.preview_T_var = make_spin(prev_row, "Preview T", default=0)
+        f3.pack(side="left")
+
         btn = tk.Frame(top, bg=BG_PANEL)
         btn.pack(fill="x", pady=(10, 0))
         make_btn(btn, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
@@ -2083,6 +2158,13 @@ class FlattenVideoFSQTab(tk.Frame):
             cmd.append("--fresh-opt")
         if self.disco_var.get():
             cmd.append("--disco")
+        prev_vid = self.preview_vid_var.get().strip()
+        if prev_vid:
+            cmd += ["--preview-image", prev_vid,
+                    "--preview-frame-skip", str(self.frame_skip_var.get())]
+        prev_T = self.preview_T_var.get()
+        if prev_T > 0:
+            cmd += ["--preview-T", str(prev_T)]
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop(self):
@@ -2357,6 +2439,8 @@ class FlattenFSQInferenceTab(tk.Frame):
             g = (gt[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
             v = (rc_vae[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
             f = (rc_flat[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+            v = v[:g.shape[0], :g.shape[1]]
+            f = f[:g.shape[0], :g.shape[1]]
             row = np.concatenate([g, sep, v, sep, f], axis=1)
             rows.append(row)
         grid = np.concatenate(sum([[r, gap] for r in rows], [])[:-1], axis=0)
@@ -2619,6 +2703,8 @@ class FlattenVideoFSQInferenceTab(tk.Frame):
                 g = (gt[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
                 v = (rc_vae[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
                 f = (rc_flat[t].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+                v = v[:g.shape[0], :g.shape[1]]
+                f = f[:g.shape[0], :g.shape[1]]
                 frame = np.concatenate([g, sep, v, sep, f], axis=1)
                 proc.stdin.write(frame.tobytes())
                 pil = Image.fromarray(frame)

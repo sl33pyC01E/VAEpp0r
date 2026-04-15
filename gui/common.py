@@ -119,7 +119,10 @@ def parse_arch_config(config):
     """
     enc_ch = config.get("encoder_channels", 64)
     if isinstance(enc_ch, str):
-        enc_ch = int(enc_ch)
+        if "," in enc_ch:
+            enc_ch = tuple(int(x.strip()) for x in enc_ch.split(","))
+        else:
+            enc_ch = int(enc_ch)
     dec_ch = config.get("decoder_channels", (256, 128, 64))
     if isinstance(dec_ch, str):
         dec_ch = tuple(int(x.strip()) for x in dec_ch.split(","))
@@ -243,6 +246,72 @@ def save_inference_output(images, logdir, prefix="inference", label="output"):
         path = os.path.join(inf_dir, f"{prefix}_{label}_{ts}_{i:02d}.png")
         pil.save(path)
     return inf_dir
+
+
+# -- Haar wavelet helpers -------------------------------------------------------
+
+def haar_down(x):
+    """2x spatial downscale: (B, C, H, W) -> (B, 4C, H/2, W/2). Lossless."""
+    x = x.contiguous()
+    a = x[:, :, 0::2, 0::2].contiguous()
+    b = x[:, :, 0::2, 1::2].contiguous()
+    c = x[:, :, 1::2, 0::2].contiguous()
+    d = x[:, :, 1::2, 1::2].contiguous()
+    ll = (a + b + c + d) * 0.5
+    lh = (a - b + c - d) * 0.5
+    hl = (a + b - c - d) * 0.5
+    hh = (a - b - c + d) * 0.5
+    return torch.cat([ll, lh, hl, hh], dim=1)
+
+def haar_down_video(x, n):
+    """Apply haar_down_n to a (B, T, C, H, W) tensor without looping over T."""
+    if n == 0:
+        return x
+    B, T, C, H, W = x.shape
+    flat = x.reshape(B * T, C, H, W)
+    for _ in range(n):
+        flat = haar_down(flat)
+    _, C2, H2, W2 = flat.shape
+    return flat.reshape(B, T, C2, H2, W2)
+
+def haar_up(x):
+    """2x spatial upscale: (B, 4C, H, W) -> (B, C, H*2, W*2). Lossless inverse."""
+    x = x.contiguous()
+    C = x.shape[1] // 4
+    ll = x[:, 0*C:1*C].contiguous()
+    lh = x[:, 1*C:2*C].contiguous()
+    hl = x[:, 2*C:3*C].contiguous()
+    hh = x[:, 3*C:4*C].contiguous()
+    a = (ll + lh + hl + hh) * 0.5
+    b = (ll - lh + hl - hh) * 0.5
+    c = (ll + lh - hl - hh) * 0.5
+    d = (ll - lh - hl + hh) * 0.5
+    B, C2, H, W = ll.shape
+    out = torch.zeros(B, C2, H * 2, W * 2, device=x.device, dtype=x.dtype)
+    out[:, :, 0::2, 0::2] = a
+    out[:, :, 0::2, 1::2] = b
+    out[:, :, 1::2, 0::2] = c
+    out[:, :, 1::2, 1::2] = d
+    return out
+
+def haar_up_video(x, n):
+    """Apply haar_up_n to a (B, T, C, H, W) tensor without looping over T."""
+    if n == 0:
+        return x
+    B, T, C, H, W = x.shape
+    flat = x.reshape(B * T, C, H, W)
+    for _ in range(n):
+        flat = haar_up(flat)
+    _, C2, H2, W2 = flat.shape
+    return flat.reshape(B, T, C2, H2, W2)
+
+def haar_down_n(x, n):
+    for _ in range(n): x = haar_down(x)
+    return x
+
+def haar_up_n(x, n):
+    for _ in range(n): x = haar_up(x)
+    return x
 
 
 # -- Chunked video inference helper --------------------------------------------

@@ -98,15 +98,46 @@ class ResidualUpsampleAdd(nn.Module):
         return x + shortcut
 
 class MemBlock(nn.Module):
-    def __init__(self, n_in, n_out):
+    def __init__(self, n_in, n_out, use_groupnorm=False):
         super().__init__()
-        self.conv = nn.Sequential(conv(n_in * 2, n_out), nn.ReLU(inplace=True),
-                                  conv(n_out, n_out), nn.ReLU(inplace=True),
-                                  conv(n_out, n_out))
+        layers = [conv(n_in * 2, n_out)]
+        if use_groupnorm:
+            layers.append(nn.GroupNorm(min(8, n_out // 8) if n_out >= 8 else 1, n_out))
+        layers += [nn.ReLU(inplace=True), conv(n_out, n_out)]
+        if use_groupnorm:
+            layers.append(nn.GroupNorm(min(8, n_out // 8) if n_out >= 8 else 1, n_out))
+        layers += [nn.ReLU(inplace=True), conv(n_out, n_out)]
+        self.conv = nn.Sequential(*layers)
         self.skip = nn.Conv2d(n_in, n_out, 1, bias=False) if n_in != n_out else nn.Identity()
         self.act = nn.ReLU(inplace=True)
+
     def forward(self, x, past):
         return self.act(self.conv(torch.cat([x, past], 1)) + self.skip(x))
+
+
+class SpatialLinearAttention(nn.Module):
+    def __init__(self, n_ch, num_heads=8, use_groupnorm=False):
+        super().__init__()
+        assert n_ch % num_heads == 0
+        self.norm = nn.GroupNorm(min(8, n_ch // 8), n_ch) if use_groupnorm else nn.Identity()
+        self.qkv = nn.Conv2d(n_ch, 3 * n_ch, 1, bias=False)
+        self.proj = nn.Conv2d(n_ch, n_ch, 1, bias=False)
+        nn.init.zeros_(self.proj.weight)
+        self.heads = num_heads
+        self.d = n_ch // num_heads
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        N = H * W
+        h = self.norm(x)
+        qkv = self.qkv(h).reshape(B * self.heads, 3, self.d, N)
+        q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+        k = k.softmax(dim=-1)
+        ctx = k @ v.transpose(-2, -1)
+        q = q.softmax(dim=-2)
+        out = (ctx.transpose(-2, -1) @ q)
+        out = out.reshape(B, C, H, W)
+        return x + self.proj(out)
 
 class TPool(nn.Module):
     def __init__(self, n_f, stride):
@@ -231,6 +262,8 @@ class MiniVAE(nn.Module):
         encoder_time_downscale=(True, True, False),
         decoder_time_upscale=(False, True, True),
         residual_shortcut=False,
+        use_attention=False,
+        use_groupnorm=False,
         checkpoint_path=None,
     ):
         super().__init__()
@@ -262,11 +295,19 @@ class MiniVAE(nn.Module):
                 enc_layers.append(ResidualDownsample(prev_ch, cur_ch))
             else:
                 enc_layers.append(conv(prev_ch, cur_ch, stride=2, bias=False))
-            enc_layers.extend([
-                MemBlock(cur_ch, cur_ch),
-                MemBlock(cur_ch, cur_ch),
-                MemBlock(cur_ch, cur_ch),
-            ])
+            if use_attention and i == n_stages - 1:
+                enc_layers.extend([
+                    MemBlock(cur_ch, cur_ch, use_groupnorm),
+                    MemBlock(cur_ch, cur_ch, use_groupnorm),
+                    SpatialLinearAttention(cur_ch, use_groupnorm=use_groupnorm),
+                    MemBlock(cur_ch, cur_ch, use_groupnorm),
+                ])
+            else:
+                enc_layers.extend([
+                    MemBlock(cur_ch, cur_ch, use_groupnorm),
+                    MemBlock(cur_ch, cur_ch, use_groupnorm),
+                    MemBlock(cur_ch, cur_ch, use_groupnorm),
+                ])
         enc_layers.append(conv(ec[-1], latent_channels))
         self.encoder = nn.Sequential(*enc_layers)
 
@@ -275,11 +316,19 @@ class MiniVAE(nn.Module):
         dec_layers = [Clamp(), conv(latent_channels, n_f[0]), nn.ReLU(inplace=True)]
         for i in range(n_stages):
             out_ch = n_f[i + 1] if i < n_stages - 1 else n_f[i]
-            dec_layers.extend([
-                MemBlock(n_f[i], n_f[i]),
-                MemBlock(n_f[i], n_f[i]),
-                MemBlock(n_f[i], n_f[i]),
-            ])
+            if use_attention and i == 0:
+                dec_layers.extend([
+                    MemBlock(n_f[i], n_f[i], use_groupnorm),
+                    MemBlock(n_f[i], n_f[i], use_groupnorm),
+                    SpatialLinearAttention(n_f[i], use_groupnorm=use_groupnorm),
+                    MemBlock(n_f[i], n_f[i], use_groupnorm),
+                ])
+            else:
+                dec_layers.extend([
+                    MemBlock(n_f[i], n_f[i], use_groupnorm),
+                    MemBlock(n_f[i], n_f[i], use_groupnorm),
+                    MemBlock(n_f[i], n_f[i], use_groupnorm),
+                ])
             if residual_shortcut:
                 save_mod = ResidualUpsampleSave()
                 dec_layers.append(save_mod)

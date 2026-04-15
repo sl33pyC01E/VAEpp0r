@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.model import MiniVAE
 from core.generator import VAEpp0rGenerator
+from core.discriminator import PatchDiscriminator, hinge_d_loss, hinge_g_loss
 
 
 # -- Haar wavelet (lossless 2x down/up) ----------------------------------------
@@ -252,6 +253,8 @@ def train(args):
         encoder_time_downscale=tuple([False] * n_stages),
         decoder_time_upscale=tuple([False] * n_stages),
         residual_shortcut=getattr(args, 'residual_shortcut', False),
+        use_attention=getattr(args, 'use_attention', False),
+        use_groupnorm=getattr(args, 'use_groupnorm', False),
     ).to(device)
     if args.grad_checkpoint:
         model.use_checkpoint = True
@@ -285,6 +288,17 @@ def train(args):
     print(f"Generator: bank={gen.bank_size}, layers={args.n_layers}, "
           f"alpha={args.alpha}, disco={gen.disco_quadrant}")
 
+    # -- PatchGAN discriminator --
+    disc = None
+    opt_disc = None
+    if args.w_gan > 0:
+        disc = PatchDiscriminator(in_ch=3, nf=args.disc_nf).to(device)
+        opt_disc = torch.optim.Adam(disc.parameters(), lr=float(args.lr),
+                                    betas=(0.5, 0.999))
+        pc_d = sum(p.numel() for p in disc.parameters())
+        print(f"PatchGAN: nf={args.disc_nf}, {pc_d:,} params, "
+              f"w_gan={args.w_gan}, start_step={args.gan_start}")
+
     # -- LPIPS --
     lpips_fn = None
     if args.w_lpips > 0:
@@ -316,6 +330,13 @@ def train(args):
                     opt.load_state_dict(ckpt["optimizer"])
                 except Exception:
                     print("  Fresh optimizer (mismatch)")
+            if disc is not None and ckpt.get("discriminator"):
+                try:
+                    disc.load_state_dict(ckpt["discriminator"])
+                    if not args.fresh_opt and ckpt.get("optimizer_disc"):
+                        opt_disc.load_state_dict(ckpt["optimizer_disc"])
+                except Exception:
+                    print("  Fresh discriminator (mismatch)")
         else:
             model.load_state_dict(ckpt, strict=False)
         print(f"Resumed from {args.resume} at step {global_step}")
@@ -352,7 +373,7 @@ def train(args):
           f"Batch: {args.batch_size}"
           f"{f', accum={accum}' if accum > 1 else ''}"
           f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}")
-    print(f"Weights: mse={args.w_mse} lpips={args.w_lpips}")
+    print(f"Weights: l1={args.w_l1} mse={args.w_mse} lpips={args.w_lpips} gan={args.w_gan}")
     print(f"Precision: {args.precision}, Device: {device}")
     print(flush=True)
 
@@ -363,8 +384,14 @@ def train(args):
         steps_k = f"{step // 1000}k" if step >= 1000 else str(step)
         return f"vae-{args.image_ch}ch-lc{latent_ch}-ec{ec_str}-dc{dc_str}-{spatial}x{haar_str}-{steps_k}.pt"
 
+    # Glob pattern scoped to THIS run only — never touch other runs' checkpoints
+    _ec_str = ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else str(enc_ch)
+    _dc_str = ",".join(str(x) for x in dec_ch)
+    _haar_str = f"-haar{haar_mode}" if haar_rounds > 0 else ""
+    _run_glob = f"vae-{args.image_ch}ch-lc{latent_ch}-ec{_ec_str}-dc{_dc_str}-{spatial}x{_haar_str}-*.pt"
+
     def _make_checkpoint():
-        return {
+        d = {
             "model": model.state_dict(),
             "optimizer": opt.state_dict(),
             "scheduler": sched.state_dict(),
@@ -377,9 +404,16 @@ def train(args):
                 "encoder_channels": ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else enc_ch,
                 "decoder_channels": ",".join(str(x) for x in dec_ch),
                 "haar": haar_mode,
+                "residual_shortcut": getattr(args, 'residual_shortcut', False),
+                "use_attention": getattr(args, 'use_attention', False),
+                "use_groupnorm": getattr(args, 'use_groupnorm', False),
                 "synthyper": True,
             },
         }
+        if disc is not None:
+            d["discriminator"] = disc.state_dict()
+            d["optimizer_disc"] = opt_disc.state_dict()
+        return d
 
     # -- Initial preview --
     preview_image = getattr(args, 'preview_image', None)
@@ -402,8 +436,13 @@ def train(args):
             break
 
         model.train()
+        if disc is not None:
+            disc.train()
         opt.zero_grad(set_to_none=True)
         losses = {}
+
+        _d_real = None
+        _d_fake = None
 
         for _ai in range(accum):
             # Generate batch on GPU — no DataLoader
@@ -459,6 +498,20 @@ def train(args):
                     total = total + args.w_lpips * lp
                     losses["lpips"] = losses.get("lpips", 0) + lp.item() / accum
 
+                # GAN generator loss
+                if disc is not None and global_step >= args.gan_start:
+                    if haar_rounds > 0:
+                        rc_2d = rc[:, 0]  # (B, vae_ch, hH, hW)
+                        fake_rgb = haar_up_n(rc_2d, haar_rounds)[:, :3, :args.H, :args.W]
+                    else:
+                        fake_rgb = rc[:, 0, :3, :args.H, :args.W]
+                    g_loss = hinge_g_loss(disc(fake_rgb * 2 - 1))
+                    total = total + args.w_gan * g_loss
+                    losses["g"] = losses.get("g", 0) + g_loss.item() / accum
+                    # Save detached copies for D update (last accum iter wins)
+                    _d_real = images[:, :3].detach()
+                    _d_fake = fake_rgb.detach()
+
             if total.dim() > 0:
                 total = total.mean()
 
@@ -470,6 +523,15 @@ def train(args):
         scaler.step(opt)
         scaler.update()
         sched.step()
+
+        # D update (once per step, after G)
+        if disc is not None and global_step >= args.gan_start and _d_real is not None:
+            opt_disc.zero_grad(set_to_none=True)
+            with torch.amp.autocast("cuda", dtype=amp_dtype):
+                d_loss = hinge_d_loss(disc(_d_real * 2 - 1), disc(_d_fake * 2 - 1))
+            d_loss.backward()
+            opt_disc.step()
+            losses["d"] = d_loss.item()
 
         global_step += 1
 
@@ -501,7 +563,7 @@ def train(args):
             torch.save(d, logdir / "latest.pt")
             print(f"  saved {named}", flush=True)
 
-            ckpts = sorted([f for f in logdir.glob("*.pt")
+            ckpts = sorted([f for f in logdir.glob(_run_glob)
                            if f.name != "latest.pt"],
                            key=lambda x: x.stat().st_mtime)
             while len(ckpts) > 10:
@@ -540,6 +602,12 @@ def main():
     p.add_argument("--w-l1", type=float, default=1.0)
     p.add_argument("--w-mse", type=float, default=0.0)
     p.add_argument("--w-lpips", type=float, default=0.5)
+    p.add_argument("--w-gan", type=float, default=0.0,
+                   help="PatchGAN adversarial loss weight (0=disabled)")
+    p.add_argument("--gan-start", type=int, default=1000,
+                   help="Step to start GAN training (let recon stabilize first)")
+    p.add_argument("--disc-nf", type=int, default=64,
+                   help="PatchGAN base channel count")
     p.add_argument("--bank-size", type=int, default=500)
     p.add_argument("--n-layers", type=int, default=128)
     p.add_argument("--alpha", type=float, default=3.0)
@@ -555,6 +623,10 @@ def main():
                         "2x: 3ch->12ch at half res. 4x: 3ch->48ch at quarter res.")
     p.add_argument("--residual-shortcut", action="store_true",
                    help="DC-AE style residual shortcuts (pixel_unshuffle/shuffle bypasses)")
+    p.add_argument("--use-attention", action="store_true",
+                   help="Add linear attention at deepest encoder/decoder stage")
+    p.add_argument("--use-groupnorm", action="store_true",
+                   help="Add GroupNorm inside MemBlock conv layers")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode (25%% pattern / 25%% collage / "
                         "25%% dense random / 25%% structured)")
