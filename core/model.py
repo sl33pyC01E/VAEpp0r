@@ -910,15 +910,22 @@ class HybridDownsample3d(nn.Module):
 
         if spatial_down:
             self.s_conv = CausalConv3d(in_ch, in_ch, (1, 3, 3), stride=(1, 2, 2))
-            self.s_pool = nn.AvgPool3d((1, 2, 2), stride=(1, 2, 2))
+            # ceil_mode=True so odd input dims match the conv output
+            # (conv: ceil(H/2), pool default: floor(H/2) — mismatch for odd H)
+            self.s_pool = nn.AvgPool3d((1, 2, 2), stride=(1, 2, 2), ceil_mode=True)
         if temporal_down:
             self.t_conv = CausalConv3d(in_ch, in_ch, (3, 1, 1), stride=(2, 1, 1))
-            self.t_pool = nn.AvgPool3d((2, 1, 1), stride=(2, 1, 1))
+            self.t_pool = nn.AvgPool3d((2, 1, 1), stride=(2, 1, 1), ceil_mode=True)
         self.out_conv = CausalConv3d(in_ch, out_ch, (1, 1, 1))
 
     def forward(self, x):
         if self.spatial_down:
-            x = self.s_conv(x) + self.s_pool(x)
+            conv_out = self.s_conv(x)
+            pool_out = self.s_pool(x)
+            # Belt-and-suspenders: trim to the smaller shape if still off by 1
+            h = min(conv_out.shape[3], pool_out.shape[3])
+            w = min(conv_out.shape[4], pool_out.shape[4])
+            x = conv_out[:, :, :, :h, :w] + pool_out[:, :, :, :h, :w]
         if self.temporal_down:
             # Causal temporal pad for pool (replicate first frame)
             x_padded = torch.cat([x[:, :, :1], x], dim=2)
@@ -1114,11 +1121,17 @@ class MiniVAE3D(nn.Module):
         assert x.ndim == 5
         # (N, T, C, H, W) -> (N, C, T, H, W)
         x = x.permute(0, 2, 1, 3, 4)
-        # Pad T to multiple of t_downscale
-        T = x.shape[2]
-        if T % self.t_downscale != 0:
-            n_pad = self.t_downscale - T % self.t_downscale
-            x = torch.cat([x, x[:, :, -1:].expand(-1, -1, n_pad, -1, -1)], dim=2)
+        # Pad T, H, W to multiples of the compression factors. Spatial pads
+        # use replicate so there's no zero-border artifact. Temporal pad
+        # replicates the last frame (matches the causal convention).
+        T, H, W = x.shape[2], x.shape[3], x.shape[4]
+        t_pad = (-T) % self.t_downscale
+        h_pad = (-H) % self.s_downscale
+        w_pad = (-W) % self.s_downscale
+        if t_pad:
+            x = torch.cat([x, x[:, :, -1:].expand(-1, -1, t_pad, -1, -1)], dim=2)
+        if h_pad or w_pad:
+            x = F.pad(x, (0, w_pad, 0, h_pad, 0, 0), mode="replicate")
         # Haar patcher (if enabled)
         if self.haar_patch is not None:
             x = self.haar_patch(x)
@@ -1133,9 +1146,11 @@ class MiniVAE3D(nn.Module):
             return z_out, indices
         return z_out
 
-    def decode_video(self, z, **kwargs):
+    def decode_video(self, z, target_shape=None, **kwargs):
         """Decode latent to video.
-        Args: z: (N, T', latent_ch, H', W')
+        Args:
+            z: (N, T', latent_ch, H', W')
+            target_shape: optional (T, H, W) to crop the decoder output to.
         Returns: (N, T'', C_out, H, W)
         """
         assert z.ndim == 5
@@ -1145,11 +1160,17 @@ class MiniVAE3D(nn.Module):
         x = self._run_modules(self.decoder, z)
         if self.haar_unpatch is not None:
             x = self.haar_unpatch(x)
+        if target_shape is not None:
+            T, H, W = target_shape
+            x = x[:, :, :T, :H, :W]
         return x.permute(0, 2, 1, 3, 4)
 
     def forward(self, x):
+        # Preserve the original (T, H, W) so the reconstruction comes back at
+        # the same resolution even when encoder pads to multiples internally.
+        _, T, _, H, W = x.shape
         latent = self.encode_video(x)
-        recon = self.decode_video(latent)
+        recon = self.decode_video(latent, target_shape=(T, H, W))
         return recon, latent
 
     def param_count(self):
