@@ -29,6 +29,9 @@ bank/
 # References (cloned repos)
 references/
 
+# Portable / local-only experimental code
+_portable/
+
 # OS
 .DS_Store
 Thumbs.db

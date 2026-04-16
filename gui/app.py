@@ -4,8 +4,8 @@
 Imports tab groups from gui_data, gui_models, gui_compress and
 assembles them into a nested notebook layout:
   Data (Static Gen, Video Gen)
-  Models (Static Train, Static Inf, Convert, Video Train, Video Inf)
-  Compress (Flatten, Flatten Inf, Flatten Video, Flatten Vid Inf, FSQ...)
+  Models (Static Train, Static Inf, Convert, Video Train, Video Train 3D, Video Inf)
+  Compress (Flatten, Flatten Inf, Flatten Video, Flatten Vid Inf)
 """
 
 import tkinter as tk
@@ -14,14 +14,11 @@ from tkinter import ttk
 from gui.common import BG, BG_PANEL, FG, ACCENT, FONT_BOLD
 from gui.data_tabs import GeneratorTab, VideoGenTab
 from gui.models_tabs import (
-    TrainingTab, InferenceTab, ConvertTab, VideoTrainTab, VideoInferenceTab,
-    FusionTrainTab,
+    TrainingTab, InferenceTab, ConvertTab, VideoTrainTab, VideoTrain3DTab,
+    VideoInferenceTab,
 )
 from gui.compress_tabs import (
     FlattenTab, FlattenInferenceTab, FlattenVideoTab, FlattenVideoInferenceTab,
-    FSQTab, FSQVideoTab, FSQInferenceTab, FSQVideoInferenceTab,
-    FlattenFSQTab, FlattenFSQInferenceTab,
-    FlattenVideoFSQTab, FlattenVideoFSQInferenceTab,
 )
 
 
@@ -60,26 +57,18 @@ class App(tk.Tk):
         models_nb.add(InferenceTab(models_nb), text="Static Inf")
         models_nb.add(ConvertTab(models_nb), text="Convert")
         models_nb.add(VideoTrainTab(models_nb), text="Video Train")
+        models_nb.add(VideoTrain3DTab(models_nb), text="Video Train 3D")
         models_nb.add(VideoInferenceTab(models_nb), text="Video Inf")
-        models_nb.add(FusionTrainTab(models_nb), text="Fusion Train")
         nb.add(models_frame, text="Models")
 
         # -- Compress --
         compress_frame = tk.Frame(nb, bg=BG)
         compress_nb = ttk.Notebook(compress_frame)
         compress_nb.pack(fill="both", expand=True)
-        compress_nb.add(FSQTab(compress_nb), text="FSQ")
-        compress_nb.add(FSQInferenceTab(compress_nb), text="FSQ Inf")
-        compress_nb.add(FSQVideoTab(compress_nb), text="FSQ Video")
-        compress_nb.add(FSQVideoInferenceTab(compress_nb), text="FSQ Vid Inf")
         compress_nb.add(FlattenTab(compress_nb), text="Flatten")
         compress_nb.add(FlattenInferenceTab(compress_nb), text="Flatten Inf")
         compress_nb.add(FlattenVideoTab(compress_nb), text="Flatten Video")
         compress_nb.add(FlattenVideoInferenceTab(compress_nb), text="Flatten Vid Inf")
-        compress_nb.add(FlattenFSQTab(compress_nb), text="Flatten FSQ")
-        compress_nb.add(FlattenFSQInferenceTab(compress_nb), text="Flat FSQ Inf")
-        compress_nb.add(FlattenVideoFSQTab(compress_nb), text="Flatten Vid FSQ")
-        compress_nb.add(FlattenVideoFSQInferenceTab(compress_nb), text="Flat Vid FSQ Inf")
         nb.add(compress_frame, text="Compress")
 
 

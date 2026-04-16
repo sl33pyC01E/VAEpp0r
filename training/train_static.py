@@ -209,12 +209,13 @@ def train(args):
     enc_ch_str = args.enc_ch
     dec_ch = tuple(int(x) for x in args.dec_ch.split(","))
     latent_ch = args.latent_ch
+    _resume_cfg = {}
     if args.resume:
         _peek = torch.load(args.resume, map_location="cpu", weights_only=False)
-        _cfg = _peek.get("config", {})
-        enc_ch_str = _cfg.get("encoder_channels", enc_ch_str)
-        latent_ch = _cfg.get("latent_channels", latent_ch)
-        dec_ch_str = _cfg.get("decoder_channels", args.dec_ch)
+        _resume_cfg = _peek.get("config", {})
+        enc_ch_str = _resume_cfg.get("encoder_channels", enc_ch_str)
+        latent_ch = _resume_cfg.get("latent_channels", latent_ch)
+        dec_ch_str = _resume_cfg.get("decoder_channels", args.dec_ch)
         if isinstance(dec_ch_str, str):
             dec_ch = tuple(int(x) for x in dec_ch_str.split(","))
         elif isinstance(dec_ch_str, (list, tuple)):
@@ -230,6 +231,28 @@ def train(args):
     else:
         enc_ch = int(enc_ch_str)
     n_stages = len(dec_ch)
+    # Parse spatial downscale/upscale per stage
+    enc_spatial_str = getattr(args, 'enc_spatial', 'true,' * n_stages + 'true')
+    dec_spatial_str = getattr(args, 'dec_spatial', 'true,' * n_stages + 'true')
+    enc_spatial_str = _resume_cfg.get("encoder_spatial_downscale", enc_spatial_str)
+    dec_spatial_str = _resume_cfg.get("decoder_spatial_upscale", dec_spatial_str)
+    if isinstance(enc_spatial_str, str):
+        enc_spatial = tuple(x.strip().lower() in ("true", "1", "yes")
+                            for x in enc_spatial_str.split(","))
+    else:
+        enc_spatial = tuple(bool(x) for x in enc_spatial_str)
+    if isinstance(dec_spatial_str, str):
+        dec_spatial = tuple(x.strip().lower() in ("true", "1", "yes")
+                            for x in dec_spatial_str.split(","))
+    else:
+        dec_spatial = tuple(bool(x) for x in dec_spatial_str)
+    # Pad or trim to match n_stages (backward compat)
+    if len(enc_spatial) < n_stages:
+        enc_spatial = enc_spatial + (True,) * (n_stages - len(enc_spatial))
+    if len(dec_spatial) < n_stages:
+        dec_spatial = dec_spatial + (True,) * (n_stages - len(dec_spatial))
+    enc_spatial = enc_spatial[:n_stages]
+    dec_spatial = dec_spatial[:n_stages]
     haar_mode = getattr(args, 'haar', 'none')
     # Backward compat: old checkpoints stored haar as bool
     if haar_mode is True:
@@ -252,6 +275,8 @@ def train(args):
         decoder_channels=dec_ch,
         encoder_time_downscale=tuple([False] * n_stages),
         decoder_time_upscale=tuple([False] * n_stages),
+        encoder_spatial_downscale=enc_spatial,
+        decoder_spatial_upscale=dec_spatial,
         residual_shortcut=getattr(args, 'residual_shortcut', False),
         use_attention=getattr(args, 'use_attention', False),
         use_groupnorm=getattr(args, 'use_groupnorm', False),
@@ -260,9 +285,11 @@ def train(args):
         model.use_checkpoint = True
     pc = model.param_count()
     mb = sum(p.numel() * 4 for p in model.parameters()) / 1024 / 1024
-    spatial = 2 ** n_stages * haar_spatial_mult
+    spatial = model.s_downscale * haar_spatial_mult
+    spatial_desc = ",".join(str(s) for s in enc_spatial)
     print(f"MiniVAE ({vae_in_ch}ch in, {latent_ch}ch latent, "
-          f"{spatial}x spatial): {pc['total']:,} params, {mb:.1f}MB"
+          f"{spatial}x spatial, enc_spatial=[{spatial_desc}]): "
+          f"{pc['total']:,} params, {mb:.1f}MB"
           f"{', grad-checkpoint' if args.grad_checkpoint else ''}")
 
     # -- Generator --
@@ -376,7 +403,7 @@ def train(args):
           f"Batch: {args.batch_size}"
           f"{f', accum={accum}' if accum > 1 else ''}"
           f"{f', gen-batch={gen_bs}' if gen_bs != args.batch_size else ''}")
-    print(f"Weights: l1={args.w_l1} mse={args.w_mse} lpips={args.w_lpips} gan={args.w_gan}")
+    print(f"Weights: l1={args.w_l1} mse={args.w_mse} lpips={args.w_lpips} lc={args.w_lc} gan={args.w_gan}")
     print(f"Precision: {args.precision}, Device: {device}")
     print(flush=True)
 
@@ -410,6 +437,8 @@ def train(args):
                 "residual_shortcut": getattr(args, 'residual_shortcut', False),
                 "use_attention": getattr(args, 'use_attention', False),
                 "use_groupnorm": getattr(args, 'use_groupnorm', False),
+                "encoder_spatial_downscale": ",".join(str(s).lower() for s in enc_spatial),
+                "decoder_spatial_upscale": ",".join(str(s).lower() for s in dec_spatial),
                 "synthyper": True,
             },
         }
@@ -500,6 +529,14 @@ def train(args):
                     lp = lpips_fn(rc_lp, gt_lp).mean()
                     total = total + args.w_lpips * lp
                     losses["lpips"] = losses.get("lpips", 0) + lp.item() / accum
+
+                # Latent consistency loss: re-encode recon, compare to original latent
+                if args.w_lc > 0:
+                    with torch.no_grad():
+                        z_prime = model.encode_video(rc)
+                    lc = F.l1_loss(z_prime, latent)
+                    total = total + args.w_lc * lc
+                    losses["lc"] = losses.get("lc", 0) + lc.item() / accum
 
                 # GAN generator loss
                 if disc is not None and global_step >= args.gan_start:
@@ -611,6 +648,8 @@ def main():
     p.add_argument("--w-l1", type=float, default=1.0)
     p.add_argument("--w-mse", type=float, default=0.0)
     p.add_argument("--w-lpips", type=float, default=0.5)
+    p.add_argument("--w-lc", type=float, default=0.0,
+                   help="Latent consistency loss: L1(re-encode(decode(z)), z) with frozen encoder")
     p.add_argument("--w-gan", type=float, default=0.1,
                    help="PatchGAN adversarial loss weight (0=disabled)")
     p.add_argument("--gan-start", type=int, default=1000,
@@ -640,6 +679,10 @@ def main():
                    help="Add linear attention at deepest encoder/decoder stage")
     p.add_argument("--use-groupnorm", action="store_true",
                    help="Add GroupNorm inside MemBlock conv layers")
+    p.add_argument("--enc-spatial", default="true,true,true",
+                   help="Spatial downscale per encoder stage (comma-separated bools)")
+    p.add_argument("--dec-spatial", default="true,true,true",
+                   help="Spatial upscale per decoder stage (comma-separated bools)")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode (25%% pattern / 25%% collage / "
                         "25%% dense random / 25%% structured)")

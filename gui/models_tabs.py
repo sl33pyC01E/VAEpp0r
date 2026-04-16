@@ -14,6 +14,24 @@ from PIL import Image, ImageTk
 
 from gui.common import *
 
+
+def _parse_spatial_config(config, n_stages):
+    """Parse encoder_spatial_downscale / decoder_spatial_upscale from checkpoint config.
+    Returns (enc_spatial, dec_spatial) tuples of bools, defaulting to all-True."""
+    def _parse(raw, n):
+        if raw is None:
+            return tuple([True] * n)
+        if isinstance(raw, str):
+            t = tuple(x.strip().lower() in ("true", "1", "yes") for x in raw.split(","))
+        else:
+            t = tuple(bool(x) for x in raw)
+        if len(t) < n:
+            t = t + (True,) * (n - len(t))
+        return t[:n]
+    return (_parse(config.get("encoder_spatial_downscale"), n_stages),
+            _parse(config.get("decoder_spatial_upscale"), n_stages))
+
+
 class TrainingTab(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=BG)
@@ -94,6 +112,8 @@ class TrainingTab(tk.Frame):
         f, self.w_mse_var = make_float(row2, "w_mse", 0.0)
         f.pack(side="left", padx=(0, 10))
         f, self.w_lpips_var = make_float(row2, "w_lpips", 0.5)
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_lc_var = make_float(row2, "w_lc", 0.0)
         f.pack(side="left", padx=(0, 10))
         f, self.w_gan_var = make_float(row2, "w_gan", 0.1)
         f.pack(side="left", padx=(0, 10))
@@ -180,6 +200,14 @@ class TrainingTab(tk.Frame):
                        activebackground=BG_PANEL, activeforeground=FG,
                        font=FONT_SMALL).pack(side="left")
 
+        # Spatial compression per stage
+        spatial_row = tk.Frame(top, bg=BG_PANEL)
+        spatial_row.pack(fill="x", pady=(5, 0))
+        f, self.enc_spatial_var = make_float(spatial_row, "Enc spatial", "true,true,true", width=16)
+        f.pack(side="left", padx=(0, 10))
+        f, self.dec_spatial_var = make_float(spatial_row, "Dec spatial", "true,true,true", width=16)
+        f.pack(side="left")
+
         # Preview
         self.preview_label = tk.Label(self, bg=BG)
         self.preview_label.pack(pady=5)
@@ -206,6 +234,11 @@ class TrainingTab(tk.Frame):
         self.residual_shortcut_var.set(cfg.get("shortcut", False))
         self.use_attention_var.set(cfg.get("attention", False))
         self.use_groupnorm_var.set(cfg.get("groupnorm", False))
+        # Set spatial defaults matching stage count
+        n_stages = len(cfg["dec_ch"].split(","))
+        default_spatial = ",".join(["true"] * n_stages)
+        self.enc_spatial_var.set(cfg.get("enc_spatial", default_spatial))
+        self.dec_spatial_var.set(cfg.get("dec_spatial", default_spatial))
 
     def start(self):
         cmd = [VENV_PYTHON, "-m", "training.train_static",
@@ -222,6 +255,7 @@ class TrainingTab(tk.Frame):
                "--w-mse", self.w_mse_var.get(),
                "--w-l1", self.w_l1_var.get(),
                "--w-lpips", self.w_lpips_var.get(),
+               "--w-lc", self.w_lc_var.get(),
                "--w-gan", self.w_gan_var.get(),
                "--gan-start", str(self.gan_start_var.get()),
                "--gan-warmup", str(self.gan_warmup_var.get()),
@@ -247,6 +281,8 @@ class TrainingTab(tk.Frame):
             cmd.append("--use-attention")
         if self.use_groupnorm_var.get():
             cmd.append("--use-groupnorm")
+        cmd += ["--enc-spatial", self.enc_spatial_var.get(),
+                "--dec-spatial", self.dec_spatial_var.get()]
         prev_img = self.preview_img_var.get().strip()
         if prev_img:
             cmd += ["--preview-image", prev_img]
@@ -358,6 +394,9 @@ class InferenceTab(tk.Frame):
             n_stages = len(dec_ch) if isinstance(dec_ch, tuple) else 3
             sd = ckpt["model"] if "model" in ckpt else ckpt
 
+            # Parse spatial config (backward compat: default all-True)
+            enc_spatial, dec_spatial = _parse_spatial_config(config, n_stages)
+
             # Try all flag combos until strict load succeeds
             flags_to_try = [
                 (config.get("residual_shortcut", False),
@@ -378,6 +417,8 @@ class InferenceTab(tk.Frame):
                     decoder_channels=dec_ch,
                     encoder_time_downscale=tuple([False] * n_stages),
                     decoder_time_upscale=tuple([False] * n_stages),
+                    encoder_spatial_downscale=enc_spatial,
+                    decoder_spatial_upscale=dec_spatial,
                     residual_shortcut=shortcut,
                     use_attention=attention,
                     use_groupnorm=groupnorm,
@@ -597,6 +638,22 @@ class ConvertTab(tk.Frame):
                      bg=BG, fg=FG, insertbackground=FG,
                      relief="flat").pack()
 
+        row3b = tk.Frame(top, bg=BG_PANEL)
+        row3b.pack(fill="x", pady=(5, 0))
+        for label, attr, default in [
+            ("Enc spatial downscale", "enc_s_var", "1,1,1"),
+            ("Dec spatial upscale",   "dec_s_var", "1,1,1"),
+        ]:
+            grp = tk.Frame(row3b, bg=BG_PANEL)
+            grp.pack(side="left", padx=(0, 10))
+            tk.Label(grp, text=label, bg=BG_PANEL, fg=FG_DIM,
+                     font=FONT_SMALL).pack(anchor="w")
+            var = tk.StringVar(value=default)
+            setattr(self, attr, var)
+            tk.Entry(grp, textvariable=var, width=12,
+                     bg=BG, fg=FG, insertbackground=FG,
+                     relief="flat").pack()
+
         btn_row = tk.Frame(top, bg=BG_PANEL)
         btn_row.pack(fill="x", pady=(10, 0))
         make_btn(btn_row, "Convert", self._convert, GREEN).pack(
@@ -664,6 +721,18 @@ class ConvertTab(tk.Frame):
             self._log(f"enc/dec time patterns must have {len(dec_ch)} values "
                       f"to match {len(dec_ch)}-stage model (got {len(enc_t)}, {len(dec_t)})")
             return
+        try:
+            enc_s = tuple(bool(int(x)) for x in self.enc_s_var.get().split(","))
+            dec_s = tuple(bool(int(x)) for x in self.dec_s_var.get().split(","))
+        except Exception:
+            self._log("Bad enc/dec spatial pattern — use comma-separated 0/1 (e.g. 1,1,1)")
+            return
+        n_s = len(dec_ch)
+        if len(enc_s) < n_s:
+            enc_s = enc_s + (True,) * (n_s - len(enc_s))
+        if len(dec_s) < n_s:
+            dec_s = dec_s + (True,) * (n_s - len(dec_s))
+        enc_s, dec_s = enc_s[:n_s], dec_s[:n_s]
         haar_mode = src_config.get("haar", "none")
         if haar_mode is True: haar_mode = "2x"
         elif not haar_mode or haar_mode is False: haar_mode = "none"
@@ -682,6 +751,8 @@ class ConvertTab(tk.Frame):
             decoder_channels=dec_ch,
             encoder_time_downscale=enc_t,
             decoder_time_upscale=dec_t,
+            encoder_spatial_downscale=enc_s,
+            decoder_spatial_upscale=dec_s,
             residual_shortcut=src_config.get("residual_shortcut", False),
             use_attention=src_config.get("use_attention", False),
             use_groupnorm=src_config.get("use_groupnorm", False),
@@ -749,6 +820,8 @@ class ConvertTab(tk.Frame):
                 "decoder_channels": ",".join(str(c) for c in dec_ch),
                 "encoder_time_downscale": ",".join(str(int(x)) for x in enc_t),
                 "decoder_time_upscale": ",".join(str(int(x)) for x in dec_t),
+                "encoder_spatial_downscale": ",".join(str(s).lower() for s in enc_s),
+                "decoder_spatial_upscale": ",".join(str(s).lower() for s in dec_s),
                 "residual_shortcut": src_config.get("residual_shortcut", False),
                 "use_attention": src_config.get("use_attention", False),
                 "use_groupnorm": src_config.get("use_groupnorm", False),
@@ -821,11 +894,14 @@ class ConvertTab(tk.Frame):
                 vae_ch = 3 * (4 ** haar_rounds)
             else:
                 vae_ch = base_ch
+            enc_spatial, dec_spatial = _parse_spatial_config(config, n_stages)
             model = MiniVAE(
                 latent_channels=lat, image_channels=vae_ch, output_channels=vae_ch,
                 encoder_channels=enc_ch, decoder_channels=dec_ch,
                 encoder_time_downscale=enc_t,
                 decoder_time_upscale=dec_t,
+                encoder_spatial_downscale=enc_spatial,
+                decoder_spatial_upscale=dec_spatial,
                 residual_shortcut=config.get("residual_shortcut", False),
                 use_attention=config.get("use_attention", False),
                 use_groupnorm=config.get("use_groupnorm", False),
@@ -883,6 +959,14 @@ class VideoTrainTab(tk.Frame):
         f, self.dec_time_var = make_float(time_row, "Dec time", "false,true,true", width=16)
         f.pack(side="left", padx=(0, 10))
         f, self.T_var = make_spin(time_row, "T (frames)", default=24)
+        f.pack(side="left")
+
+        # Spatial config row
+        spatial_row = tk.Frame(top, bg=BG_PANEL)
+        spatial_row.pack(fill="x", pady=(5, 0))
+        f, self.enc_spatial_var = make_float(spatial_row, "Enc spatial", "true,true,true", width=16)
+        f.pack(side="left", padx=(0, 10))
+        f, self.dec_spatial_var = make_float(spatial_row, "Dec spatial", "true,true,true", width=16)
         f.pack(side="left")
 
         row1 = tk.Frame(top, bg=BG_PANEL)
@@ -1060,6 +1144,8 @@ class VideoTrainTab(tk.Frame):
             cmd.append("--use-attention")
         if self.use_groupnorm_var.get():
             cmd.append("--use-groupnorm")
+        cmd += ["--enc-spatial", self.enc_spatial_var.get(),
+                "--dec-spatial", self.dec_spatial_var.get()]
         haar = self.haar_var.get()
         if haar != "none":
             cmd += ["--haar", haar]
@@ -1136,6 +1222,291 @@ class VideoTrainTab(tk.Frame):
         self._video_idx += 1
         self.after(33, self._play_preview_loop, self._play_gen)
 
+
+class VideoTrain3DTab(tk.Frame):
+    """Video training with MiniVAE3D (Cosmos-style causal 3D architecture)."""
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._video_frames = []
+        self._video_playing = False
+        self._video_idx = 0
+        self._preview_photo = None
+        self.build()
+
+    def build(self):
+        top = tk.Frame(self, bg=BG_PANEL, padx=10, pady=10)
+        top.pack(fill="x", padx=5, pady=5)
+
+        tk.Label(top, text="Video Training 3D (MiniVAE3D)", bg=BG_PANEL, fg=FG,
+                 font=FONT_TITLE).pack(anchor="w")
+
+        # Architecture row
+        arch_row = tk.Frame(top, bg=BG_PANEL)
+        arch_row.pack(fill="x", pady=(10, 0))
+        f, self.latent_var = make_spin(arch_row, "Latent ch", default=16)
+        f.pack(side="left", padx=(0, 10))
+        f, self.base_ch_var = make_spin(arch_row, "Base ch", default=64)
+        f.pack(side="left", padx=(0, 10))
+        f, self.ch_mult_var = make_float(arch_row, "Ch mult", "1,2,4,4", width=12)
+        f.pack(side="left", padx=(0, 10))
+        f, self.num_res_var = make_spin(arch_row, "Res blocks", default=2)
+        f.pack(side="left")
+
+        # Temporal/spatial config row
+        ts_row = tk.Frame(top, bg=BG_PANEL)
+        ts_row.pack(fill="x", pady=(5, 0))
+        f, self.t_down_var = make_float(ts_row, "Temporal down", "true,true,true,false", width=22)
+        f.pack(side="left", padx=(0, 10))
+        f, self.s_down_var = make_float(ts_row, "Spatial down", "true,true,true,true", width=22)
+        f.pack(side="left", padx=(0, 10))
+        f, self.T_var = make_spin(ts_row, "T (frames)", default=17)
+        f.pack(side="left")
+
+        # Haar + FSQ row
+        fs_row = tk.Frame(top, bg=BG_PANEL)
+        fs_row.pack(fill="x", pady=(5, 0))
+        f, self.haar_levels_var = make_spin(fs_row, "Haar levels (0/1/2)", default=0)
+        f.pack(side="left", padx=(0, 10))
+        self.fsq_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(fs_row, text="FSQ", variable=self.fsq_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, activeforeground=FG,
+                       font=FONT_SMALL).pack(side="left", padx=(0, 10))
+        f, self.fsq_levels_var = make_float(fs_row, "FSQ levels", "8,8,8,5,5,5", width=14)
+        f.pack(side="left", padx=(0, 10))
+        f, self.fsq_stages_var = make_spin(fs_row, "FSQ stages", default=4)
+        f.pack(side="left")
+
+        # Training config
+        row1 = tk.Frame(top, bg=BG_PANEL)
+        row1.pack(fill="x", pady=(5, 0))
+        f, self.lr_var = make_float(row1, "LR", "2e-4")
+        f.pack(side="left", padx=(0, 10))
+        f, self.batch_var = make_spin(row1, "Batch", default=1)
+        f.pack(side="left", padx=(0, 10))
+        f, self.steps_var = make_spin(row1, "Total steps", default=30000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.prec_var = make_float(row1, "Precision", "bf16")
+        f.pack(side="left")
+
+        # Loss weights
+        row2 = tk.Frame(top, bg=BG_PANEL)
+        row2.pack(fill="x", pady=(5, 0))
+        f, self.w_l1_var = make_float(row2, "w_l1", 1.0)
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_mse_var = make_float(row2, "w_mse", 0.0)
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_lpips_var = make_float(row2, "w_lpips", 0.5)
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_temp_var = make_float(row2, "w_temporal", 2.0)
+        f.pack(side="left", padx=(0, 10))
+        f, self.w_gan_var = make_float(row2, "w_gan", 0.0)
+        f.pack(side="left", padx=(0, 10))
+        f, self.gan_start_var = make_spin(row2, "GAN start", default=1000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.bank_var = make_spin(row2, "Bank size", default=5000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.layers_var = make_spin(row2, "Layers", default=128)
+        f.pack(side="left")
+
+        # Logging
+        row3 = tk.Frame(top, bg=BG_PANEL)
+        row3.pack(fill="x", pady=(5, 0))
+        f, self.log_every_var = make_spin(row3, "Log every", default=1)
+        f.pack(side="left", padx=(0, 10))
+        f, self.save_every_var = make_spin(row3, "Save every", default=5000)
+        f.pack(side="left", padx=(0, 10))
+        f, self.preview_every_var = make_spin(row3, "Preview every", default=100)
+        f.pack(side="left", padx=(0, 10))
+        f, self.logdir_var = make_float(row3, "Log dir", "synthyper_video3d_logs")
+        f.pack(side="left", padx=(0, 10))
+        f, self.resume_var = make_float(row3, "Resume",
+            os.path.join(PROJECT_ROOT, "synthyper_video3d_logs", "latest.pt"))
+        f.pack(side="left")
+
+        row4 = tk.Frame(top, bg=BG_PANEL)
+        row4.pack(fill="x", pady=(5, 0))
+        self.use_latest_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row4, text="Resume from latest.pt",
+                       variable=self.use_latest_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       font=FONT, command=self._toggle_latest).pack(side="left")
+        self.fresh_opt_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(row4, text="Fresh optimizer",
+                       variable=self.fresh_opt_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       font=FONT).pack(side="left", padx=(0, 10))
+        f_wu, self.warmup_steps_var = make_spin(row4, "Warmup steps", default=0)
+        f_wu.pack(side="left")
+
+        # Preview video
+        prev_row = tk.Frame(top, bg=BG_PANEL)
+        prev_row.pack(fill="x", pady=(5, 0))
+        self.preview_vid_var = tk.StringVar(value="")
+        f = tk.Frame(prev_row, bg=BG_PANEL)
+        tk.Label(f, text="Preview video", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(anchor="w")
+        ef = tk.Frame(f, bg=BG_PANEL)
+        tk.Entry(ef, textvariable=self.preview_vid_var, bg=BG_INPUT, fg=FG,
+                 font=FONT, width=40, borderwidth=0,
+                 insertbackground=FG).pack(side="left", fill="x", expand=True)
+        from tkinter import filedialog
+        make_btn(ef, "Browse",
+                 lambda: self.preview_vid_var.set(
+                     filedialog.askopenfilename(
+                         filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv"),
+                                    ("All", "*.*")]) or self.preview_vid_var.get()),
+                 ACCENT, width=7).pack(side="left", padx=(5, 0))
+        ef.pack(fill="x")
+        f.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        f2, self.frame_skip_var = make_spin(prev_row, "Frame skip", default=0)
+        f2.pack(side="left", padx=(0, 10))
+        f3, self.preview_T_var = make_spin(prev_row, "Preview T", default=0)
+        f3.pack(side="left")
+
+        # Buttons
+        btn_row = tk.Frame(top, bg=BG_PANEL)
+        btn_row.pack(fill="x", pady=(10, 0))
+        make_btn(btn_row, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
+        make_btn(btn_row, "Stop (save)", self.stop_save, BLUE).pack(side="left", padx=(0, 5))
+        make_btn(btn_row, "Kill", self.kill, RED).pack(side="left", padx=(0, 5))
+        self.disco_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(btn_row, text="Disco Quadrant", variable=self.disco_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, activeforeground=FG,
+                       font=FONT_SMALL).pack(side="left", padx=(0, 10))
+        self.grad_ckpt_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(btn_row, text="Grad Checkpoint", variable=self.grad_ckpt_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, activeforeground=FG,
+                       font=FONT_SMALL).pack(side="left", padx=(0, 10))
+
+        # Preview + Log
+        self.preview_label = tk.Label(self, bg=BG)
+        self.preview_label.pack(pady=5)
+        self.log = make_log(self)
+        self.log.pack(fill="both", expand=True, padx=5, pady=5)
+        self.runner = ProcRunner(self.log)
+
+        self._check_preview()
+
+    def _toggle_latest(self):
+        if self.use_latest_var.get():
+            logdir = self.logdir_var.get()
+            self.resume_var.set(os.path.join(PROJECT_ROOT, logdir, "latest.pt"))
+            self.fresh_opt_var.set(False)
+
+    def start(self):
+        cmd = [VENV_PYTHON, "-m", "training.train_video3d",
+               "--latent-ch", str(self.latent_var.get()),
+               "--base-ch", str(self.base_ch_var.get()),
+               "--ch-mult", self.ch_mult_var.get(),
+               "--num-res-blocks", str(self.num_res_var.get()),
+               "--temporal-down", self.t_down_var.get(),
+               "--spatial-down", self.s_down_var.get(),
+               "--haar-levels", str(self.haar_levels_var.get()),
+               "--fsq-levels", self.fsq_levels_var.get(),
+               "--fsq-stages", str(self.fsq_stages_var.get()),
+               "--lr", self.lr_var.get(),
+               "--batch-size", str(self.batch_var.get()),
+               "--T", str(self.T_var.get()),
+               "--total-steps", str(self.steps_var.get()),
+               "--precision", self.prec_var.get(),
+               "--w-l1", self.w_l1_var.get(),
+               "--w-mse", self.w_mse_var.get(),
+               "--w-lpips", self.w_lpips_var.get(),
+               "--w-temporal", self.w_temp_var.get(),
+               "--w-gan", self.w_gan_var.get(),
+               "--gan-start", str(self.gan_start_var.get()),
+               "--bank-size", str(self.bank_var.get()),
+               "--n-layers", str(self.layers_var.get()),
+               "--log-every", str(self.log_every_var.get()),
+               "--save-every", str(self.save_every_var.get()),
+               "--preview-every", str(self.preview_every_var.get()),
+               "--warmup-steps", str(self.warmup_steps_var.get()),
+               "--logdir", self.logdir_var.get()]
+        resume = self.resume_var.get().strip()
+        if resume:
+            cmd += ["--resume", resume]
+        if self.fresh_opt_var.get():
+            cmd += ["--fresh-opt"]
+        if self.fsq_var.get():
+            cmd += ["--fsq"]
+        if self.disco_var.get():
+            cmd.append("--disco")
+        if self.grad_ckpt_var.get():
+            cmd.append("--grad-checkpoint")
+        prev_vid = self.preview_vid_var.get().strip()
+        if prev_vid:
+            cmd += ["--preview-image", prev_vid,
+                    "--preview-frame-skip", str(self.frame_skip_var.get())]
+        prev_T = self.preview_T_var.get()
+        if prev_T > 0:
+            cmd += ["--preview-T", str(prev_T)]
+        self.runner.run(cmd, cwd=PROJECT_ROOT)
+
+    def stop_save(self):
+        logdir = os.path.join(PROJECT_ROOT, self.logdir_var.get())
+        os.makedirs(logdir, exist_ok=True)
+        Path(os.path.join(logdir, ".stop")).touch()
+        self.runner._append("[Stop file written]\n")
+
+    def kill(self):
+        self.runner.kill()
+
+    def _check_preview(self):
+        logdir = os.path.join(PROJECT_ROOT, self.logdir_var.get())
+        preview = os.path.join(logdir, "preview_latest.mp4")
+        if os.path.exists(preview):
+            try:
+                mtime = os.path.getmtime(preview)
+                if not hasattr(self, '_last_mtime') or mtime != self._last_mtime:
+                    self._last_mtime = mtime
+                    self._video_playing = False
+                    probe = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-show_entries",
+                         "stream=width,height", "-of", "csv=p=0", preview],
+                        capture_output=True, text=True)
+                    parts = probe.stdout.strip().split(",")
+                    if len(parts) >= 2:
+                        try:
+                            w, h = int(parts[0]), int(parts[1])
+                        except (ValueError, TypeError):
+                            w, h = 0, 0
+                        if w > 0 and h > 0:
+                            cmd = ["ffmpeg", "-v", "quiet", "-i", preview,
+                                   "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+                            raw = subprocess.run(cmd, capture_output=True).stdout
+                            fs = w * h * 3
+                            n = len(raw) // fs
+                            if n > 0:
+                                scale = min(700 / w, 300 / h, 1.0)
+                                dw = int(w * scale) if scale < 1 else w
+                                dh = int(h * scale) if scale < 1 else h
+                                self._video_frames = []
+                                for fi in range(n):
+                                    arr = np.frombuffer(
+                                        raw[fi*fs:(fi+1)*fs],
+                                        dtype=np.uint8).reshape(h, w, 3)
+                                    pil = Image.fromarray(arr)
+                                    if scale < 1:
+                                        pil = pil.resize((dw, dh), BILINEAR)
+                                    self._video_frames.append(ImageTk.PhotoImage(pil))
+                                self._video_idx = 0
+                                self._play_gen = getattr(self, '_play_gen', 0) + 1
+                                self._play_preview_loop(self._play_gen)
+            except Exception:
+                pass
+        self.after(5000, self._check_preview)
+
+    def _play_preview_loop(self, gen_id=None):
+        if gen_id != self._play_gen or not self._video_frames:
+            return
+        self._video_idx = self._video_idx % len(self._video_frames)
+        self.preview_label.config(image=self._video_frames[self._video_idx])
+        self._video_idx += 1
+        self.after(33, self._play_preview_loop, self._play_gen)
 
 
 class VideoInferenceTab(tk.Frame):
@@ -1222,10 +1593,13 @@ class VideoInferenceTab(tk.Frame):
                 etd = tuple([False] * n_stages)
                 dtu = tuple([False] * n_stages)
 
+            enc_spatial, dec_spatial = _parse_spatial_config(config, n_stages)
             self.model = MiniVAE(
                 latent_channels=lat, image_channels=vae_in_ch, output_channels=vae_in_ch,
                 encoder_channels=enc_ch, decoder_channels=dec_ch,
                 encoder_time_downscale=etd, decoder_time_upscale=dtu,
+                encoder_spatial_downscale=enc_spatial,
+                decoder_spatial_upscale=dec_spatial,
                 residual_shortcut=config.get("residual_shortcut", False),
                 use_attention=config.get("use_attention", False),
                 use_groupnorm=config.get("use_groupnorm", False),
@@ -1404,196 +1778,3 @@ class VideoInferenceTab(tk.Frame):
         self._video_idx = idx + 1
         self.after(33, self._play_video_loop, self._play_gen)
 
-
-class FusionTrainTab(tk.Frame):
-    """CPU VAE + MiniVAE fusion training tab."""
-    def __init__(self, parent):
-        super().__init__(parent, bg=BG)
-        self._preview_photo = None
-        self._last_mtime = 0
-        self.build()
-
-    def build(self):
-        top = tk.Frame(self, bg=BG_PANEL, padx=10, pady=10)
-        top.pack(fill="x", padx=5, pady=5)
-
-        tk.Label(top, text="Fusion Training (CPU VAE + MiniVAE)", bg=BG_PANEL,
-                 fg=FG, font=FONT_TITLE).pack(anchor="w")
-        tk.Label(top, text="Frozen CPU VAE preprocessor → MiniVAE compression",
-                 bg=BG_PANEL, fg=FG_DIM, font=FONT_SMALL).pack(anchor="w",
-                                                                 pady=(2, 10))
-
-        # CPU VAE checkpoint
-        cpu_row = tk.Frame(top, bg=BG_PANEL)
-        cpu_row.pack(fill="x", pady=(5, 0))
-        f, self.cpu_ckpt_var = make_float(cpu_row, "CPU VAE checkpoint",
-            os.path.join(PROJECT_ROOT, "cpu_vae_logs", "latest.pt"), width=50)
-        f.pack(side="left", fill="x", expand=True)
-
-        # MiniVAE architecture
-        arch_row = tk.Frame(top, bg=BG_PANEL)
-        arch_row.pack(fill="x", pady=(5, 0))
-        f, self.latent_var = make_spin(arch_row, "Latent ch", default=4)
-        f.pack(side="left", padx=(0, 10))
-        f, self.enc_ch_var = make_float(arch_row, "Enc ch", "64", width=12)
-        f.pack(side="left", padx=(0, 10))
-        f, self.dec_ch_var = make_float(arch_row, "Dec ch", "256,128,64", width=14)
-        f.pack(side="left")
-
-        # Training params
-        row1 = tk.Frame(top, bg=BG_PANEL)
-        row1.pack(fill="x", pady=(5, 0))
-        f, self.lr_var = make_float(row1, "LR", "2e-4")
-        f.pack(side="left", padx=(0, 10))
-        f, self.batch_var = make_spin(row1, "Batch", default=4)
-        f.pack(side="left", padx=(0, 10))
-        f, self.steps_var = make_spin(row1, "Total steps", default=30000)
-        f.pack(side="left", padx=(0, 10))
-        f, self.prec_var = make_float(row1, "Precision", "bf16")
-        f.pack(side="left")
-
-        # Loss weights
-        row2 = tk.Frame(top, bg=BG_PANEL)
-        row2.pack(fill="x", pady=(5, 0))
-        f, self.w_l1_var = make_float(row2, "w_l1", "1.0")
-        f.pack(side="left", padx=(0, 10))
-        f, self.w_mse_var = make_float(row2, "w_mse", "0.0")
-        f.pack(side="left", padx=(0, 10))
-        f, self.w_pixel_var = make_float(row2, "w_pixel", "0.5")
-        f.pack(side="left", padx=(0, 10))
-        f, self.w_lpips_var = make_float(row2, "w_lpips", "0.0")
-        f.pack(side="left")
-
-        # Save/log
-        row3 = tk.Frame(top, bg=BG_PANEL)
-        row3.pack(fill="x", pady=(5, 0))
-        f, self.save_every_var = make_spin(row3, "Save every", default=5000)
-        f.pack(side="left", padx=(0, 10))
-        f, self.preview_every_var = make_spin(row3, "Preview every", default=100)
-        f.pack(side="left", padx=(0, 10))
-        f, self.logdir_var = make_float(row3, "Log dir", "fusion_logs")
-        f.pack(side="left", padx=(0, 10))
-        f, self.resume_var = make_float(row3, "Resume", "")
-        f.pack(side="left")
-
-        # Options
-        row4 = tk.Frame(top, bg=BG_PANEL)
-        row4.pack(fill="x", pady=(5, 0))
-        self.disco_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(row4, text="Disco Quadrant", variable=self.disco_var,
-                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
-                       activebackground=BG_PANEL, font=FONT_SMALL
-                       ).pack(side="left", padx=(0, 10))
-        self.fresh_opt_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(row4, text="Fresh opt", variable=self.fresh_opt_var,
-                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
-                       activebackground=BG_PANEL, font=FONT_SMALL
-                       ).pack(side="left", padx=(0, 10))
-        self.grad_ckpt_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(row4, text="Grad checkpoint", variable=self.grad_ckpt_var,
-                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
-                       activebackground=BG_PANEL, font=FONT_SMALL
-                       ).pack(side="left")
-
-        # Preview image
-        prev_row = tk.Frame(top, bg=BG_PANEL)
-        prev_row.pack(fill="x", pady=(5, 0))
-        self.preview_img_var = tk.StringVar(value="")
-        f = tk.Frame(prev_row, bg=BG_PANEL)
-        tk.Label(f, text="Preview image", bg=BG_PANEL, fg=FG_DIM,
-                 font=FONT_SMALL).pack(anchor="w")
-        ef = tk.Frame(f, bg=BG_PANEL)
-        tk.Entry(ef, textvariable=self.preview_img_var, bg=BG_INPUT, fg=FG,
-                 font=FONT, width=45, borderwidth=0,
-                 insertbackground=FG).pack(side="left", fill="x", expand=True)
-        from tkinter import filedialog
-        make_btn(ef, "Browse",
-                 lambda: self.preview_img_var.set(
-                     filedialog.askopenfilename(
-                         filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.webp"),
-                                    ("All", "*.*")]) or self.preview_img_var.get()),
-                 ACCENT, width=7).pack(side="left", padx=(5, 0))
-        ef.pack(fill="x")
-        f.pack(side="left", fill="x", expand=True)
-
-        # Buttons
-        btn_row = tk.Frame(top, bg=BG_PANEL)
-        btn_row.pack(fill="x", pady=(10, 0))
-        make_btn(btn_row, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
-        make_btn(btn_row, "Stop (save)", self.stop_save, BLUE).pack(side="left", padx=(0, 5))
-        make_btn(btn_row, "Kill", self.kill, RED).pack(side="left")
-
-        # Preview
-        self.preview_label = tk.Label(self, bg=BG)
-        self.preview_label.pack(pady=5)
-
-        # Log
-        self.log = make_log(self)
-        self.log.pack(fill="both", expand=True, padx=5, pady=5)
-        self.runner = ProcRunner(self.log)
-
-        self._check_preview()
-
-    def start(self):
-        cmd = [VENV_PYTHON, "-m", "training.train_fusion",
-               "--cpu-vae-ckpt", self.cpu_ckpt_var.get(),
-               "--latent-ch", str(self.latent_var.get()),
-               "--enc-ch", self.enc_ch_var.get(),
-               "--dec-ch", self.dec_ch_var.get(),
-               "--lr", self.lr_var.get(),
-               "--batch-size", str(self.batch_var.get()),
-               "--total-steps", str(self.steps_var.get()),
-               "--precision", self.prec_var.get(),
-               "--w-l1", self.w_l1_var.get(),
-               "--w-mse", self.w_mse_var.get(),
-               "--w-pixel", self.w_pixel_var.get(),
-               "--w-lpips", self.w_lpips_var.get(),
-               "--save-every", str(self.save_every_var.get()),
-               "--preview-every", str(self.preview_every_var.get()),
-               "--logdir", self.logdir_var.get()]
-        resume = self.resume_var.get().strip()
-        if resume:
-            cmd += ["--resume", resume]
-        if self.disco_var.get():
-            cmd.append("--disco")
-        if self.fresh_opt_var.get():
-            cmd.append("--fresh-opt")
-        if self.grad_ckpt_var.get():
-            cmd.append("--grad-checkpoint")
-        prev_img = self.preview_img_var.get().strip()
-        if prev_img:
-            cmd += ["--preview-image", prev_img]
-        self.runner.run(cmd, cwd=PROJECT_ROOT)
-
-    def stop_save(self):
-        logdir = os.path.join(PROJECT_ROOT, self.logdir_var.get())
-        os.makedirs(logdir, exist_ok=True)
-        Path(os.path.join(logdir, ".stop")).touch()
-        self.runner._append("[Stop file written]\n")
-
-    def kill(self):
-        self.runner.kill()
-
-    def _check_preview(self):
-        logdir = os.path.join(PROJECT_ROOT, self.logdir_var.get())
-        preview = os.path.join(logdir, "preview_latest.png")
-        if os.path.exists(preview):
-            try:
-                mtime = os.path.getmtime(preview)
-                if mtime != self._last_mtime:
-                    self._last_mtime = mtime
-                    from PIL import Image as PILImg, ImageTk as PILTk
-                    pil = PILImg.open(preview)
-                    w, h = pil.size
-                    if w > 900:
-                        scale = 900 / w
-                        pil = pil.resize((int(w * scale), int(h * scale)),
-                                         BILINEAR)
-                    self._preview_photo = PILTk.PhotoImage(pil)
-                    self.preview_label.config(image=self._preview_photo)
-            except Exception:
-                pass
-        self.after(2000, self._check_preview)
-
-
-# -- Flatten Experiment Tab -----------------------------------------------------

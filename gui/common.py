@@ -319,15 +319,10 @@ CHUNK_SIZE = 24
 
 @torch.no_grad()
 def chunked_vae_inference(model, x, chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloat16):
-    """Run VAE encode+decode in overlapping chunks with 1:1 frame alignment.
+    """Run VAE encode+decode in overlapping chunks with cross-fade blending.
 
-    Each chunk of `chunk_size` input frames produces `chunk_size - trim`
-    output frames (trim = frames_to_trim). The `trim` leading input frames
-    are consumed as temporal context.
-
-    To maintain alignment, each chunk's input overlaps the previous by `trim`
-    frames so those context frames come from real data. Output stride equals
-    `chunk_size - trim` frames per chunk.
+    Uses large overlap (half the output length) and linearly blends in the
+    overlap region to eliminate flicker at chunk boundaries.
 
     Returns:
         recon: aligned to input[trim:], so T_out = T_in - trim
@@ -341,14 +336,18 @@ def chunked_vae_inference(model, x, chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloa
             recon, latent = model(x)
         return recon, latent
 
-    all_recon = []
-    all_latent = []
     output_per_chunk = chunk_size - trim
-    target_len = T - trim  # total recon frames we want
+    # Overlap by half the output length for smooth blending
+    overlap = max(output_per_chunk // 2, trim)
+    stride = output_per_chunk - overlap
+    target_len = T - trim
+
+    # Collect all chunk outputs with their positions
+    chunks_out = []  # list of (start_frame, recon_tensor)
+    all_latent = []
 
     chunk_start = 0
-    collected = 0
-    while chunk_start < T and collected < target_len:
+    while chunk_start < T:
         chunk_end = min(chunk_start + chunk_size, T)
         chunk = x[:, chunk_start:chunk_end]
 
@@ -358,28 +357,63 @@ def chunked_vae_inference(model, x, chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloa
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             rc, lat = model(chunk)
 
-        # How many frames we still need
-        need = target_len - collected
-        keep = min(rc.shape[1], need)
-        all_recon.append(rc[:, :keep].float().cpu())
+        # This chunk's output covers input frames [chunk_start+trim .. chunk_end)
+        # which maps to output frames [chunk_start .. chunk_start + rc.shape[1])
+        # (relative to the trim-offset output timeline)
+        out_start = chunk_start  # in output frame space (0-indexed from trim)
+        chunks_out.append((out_start, rc.float().cpu()))
         all_latent.append(lat.float().cpu())
-        collected += keep
         del rc, lat
         torch.cuda.empty_cache()
 
-        if chunk_end >= T or collected >= target_len:
+        if chunk_end >= T:
             break
 
-        chunk_start += output_per_chunk
+        chunk_start += stride
 
-    return torch.cat(all_recon, dim=1), torch.cat(all_latent, dim=1)
+    # Blend overlapping chunks
+    if not chunks_out:
+        return torch.zeros(x.shape[0], 0, *x.shape[2:]), torch.cat(all_latent, dim=1)
+
+    # Allocate output buffer
+    B = x.shape[0]
+    sample_rc = chunks_out[0][1]
+    C_out = sample_rc.shape[2]
+    H_out = sample_rc.shape[3]
+    W_out = sample_rc.shape[4]
+
+    recon = torch.zeros(B, target_len, C_out, H_out, W_out)
+    weight = torch.zeros(B, target_len, 1, 1, 1)
+
+    for out_start, rc in chunks_out:
+        n_frames = rc.shape[1]
+        # Ramp weights: fade in at start, fade out at end
+        w = torch.ones(n_frames)
+        fade_len = min(overlap, n_frames // 2)
+        if fade_len > 0 and out_start > 0:
+            # Fade in (not for first chunk)
+            w[:fade_len] = torch.linspace(0, 1, fade_len)
+        # Note: we don't fade out — the next chunk's fade-in handles blending
+
+        for t in range(n_frames):
+            out_t = out_start + t
+            if 0 <= out_t < target_len:
+                wt = w[t]
+                recon[:, out_t] += rc[:, t] * wt
+                weight[:, out_t] += wt
+
+    # Normalize by total weight
+    weight = weight.clamp(min=1e-6)
+    recon = recon / weight
+
+    return recon, torch.cat(all_latent, dim=1)
 
 
 @torch.no_grad()
 def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
                                amp_dtype=torch.bfloat16,
                                encode_fn=None, decode_fn=None):
-    """Run VAE encode → flatten/deflatten → VAE decode in chunks.
+    """Run VAE encode -> flatten/deflatten -> VAE decode in chunks with cross-fade.
     encode_fn/decode_fn override vae paths when provided (for FSQ)."""
     _encode = encode_fn or (lambda c: vae.encode_video(c))
     _decode = decode_fn or (lambda z: vae.decode_video(z))
@@ -397,14 +431,16 @@ def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
 
     trim = getattr(vae, 'frames_to_trim', 0)
     output_per_chunk = chunk_size - trim
+    overlap = max(output_per_chunk // 2, trim)
+    stride = output_per_chunk - overlap
     target_len = T - trim
-    all_vae = []
-    all_flat = []
+
+    chunks_vae = []
+    chunks_flat = []
     all_lat = []
 
     chunk_start = 0
-    collected = 0
-    while chunk_start < T and collected < target_len:
+    while chunk_start < T:
         chunk_end = min(chunk_start + chunk_size, T)
         chunk = x[:, chunk_start:chunk_end]
 
@@ -420,27 +456,47 @@ def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
             lat_r = lat_r.reshape(B, Tp, C, Hl, Wl)
             rc_flat = _decode(lat_r)
 
-        need = target_len - collected
-        keep = min(rc_vae.shape[1], rc_flat.shape[1], need)
-        all_vae.append(rc_vae[:, :keep].float().cpu())
-        all_flat.append(rc_flat[:, :keep].float().cpu())
+        chunks_vae.append((chunk_start, rc_vae.float().cpu()))
+        chunks_flat.append((chunk_start, rc_flat.float().cpu()))
         all_lat.append(lat.float().cpu())
-        collected += keep
         del rc_vae, rc_flat, lat, lat_r, lat_f
         torch.cuda.empty_cache()
 
-        if chunk_end >= T or collected >= target_len:
+        if chunk_end >= T:
             break
-        chunk_start += output_per_chunk
+        chunk_start += stride
 
-    return torch.cat(all_vae, dim=1), torch.cat(all_flat, dim=1), \
-           torch.cat(all_lat, dim=1)
+    def _blend(chunks_list, target_len, B):
+        if not chunks_list:
+            return torch.zeros(B, 0)
+        sample = chunks_list[0][1]
+        C_o, H_o, W_o = sample.shape[2], sample.shape[3], sample.shape[4]
+        out = torch.zeros(B, target_len, C_o, H_o, W_o)
+        wgt = torch.zeros(B, target_len, 1, 1, 1)
+        for out_start, rc in chunks_list:
+            n = rc.shape[1]
+            w = torch.ones(n)
+            fade = min(overlap, n // 2)
+            if fade > 0 and out_start > 0:
+                w[:fade] = torch.linspace(0, 1, fade)
+            for t in range(n):
+                ot = out_start + t
+                if 0 <= ot < target_len:
+                    out[:, ot] += rc[:, t] * w[t]
+                    wgt[:, ot] += w[t]
+        return out / wgt.clamp(min=1e-6)
+
+    B = x.shape[0]
+    recon_vae = _blend(chunks_vae, target_len, B)
+    recon_flat = _blend(chunks_flat, target_len, B)
+
+    return recon_vae, recon_flat, torch.cat(all_lat, dim=1)
 
 
 @torch.no_grad()
 def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
                            chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloat16):
-    """Run VAE encode → pre_quant → FSQ → post_quant → VAE decode in chunks.
+    """Run VAE encode -> FSQ -> VAE decode in chunks with cross-fade.
 
     Returns:
         recon_fsq: FSQ reconstruction (aligned to input[trim:])
@@ -460,12 +516,14 @@ def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
 
     trim = getattr(vae, 'frames_to_trim', 0)
     output_per_chunk = chunk_size - trim
+    overlap = max(output_per_chunk // 2, trim)
+    stride = output_per_chunk - overlap
     target_len = T - trim
-    all_fsq = []
+
+    chunks_out = []
 
     chunk_start = 0
-    collected = 0
-    while chunk_start < T and collected < target_len:
+    while chunk_start < T:
         chunk_end = min(chunk_start + chunk_size, T)
         chunk = x[:, chunk_start:chunk_end]
 
@@ -482,15 +540,33 @@ def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
             lat_q = lat_q.reshape(B, Tp, C, Hl, Wl)
             rc_fsq = vae.decode_video(lat_q)
 
-        need = target_len - collected
-        keep = min(rc_fsq.shape[1], need)
-        all_fsq.append(rc_fsq[:, :keep].float().cpu())
-        collected += keep
+        chunks_out.append((chunk_start, rc_fsq.float().cpu()))
         del rc_fsq, lat, lat_flat, z_proj, z_q, lat_q
         torch.cuda.empty_cache()
 
-        if chunk_end >= T or collected >= target_len:
+        if chunk_end >= T:
             break
-        chunk_start += output_per_chunk
+        chunk_start += stride
 
-    return torch.cat(all_fsq, dim=1)
+    if not chunks_out:
+        return torch.zeros(x.shape[0], 0, *x.shape[2:])
+
+    sample = chunks_out[0][1]
+    B = x.shape[0]
+    C_o, H_o, W_o = sample.shape[2], sample.shape[3], sample.shape[4]
+    out = torch.zeros(B, target_len, C_o, H_o, W_o)
+    wgt = torch.zeros(B, target_len, 1, 1, 1)
+
+    for out_start, rc in chunks_out:
+        n = rc.shape[1]
+        w = torch.ones(n)
+        fade = min(overlap, n // 2)
+        if fade > 0 and out_start > 0:
+            w[:fade] = torch.linspace(0, 1, fade)
+        for t in range(n):
+            ot = out_start + t
+            if 0 <= ot < target_len:
+                out[:, ot] += rc[:, t] * w[t]
+                wgt[:, ot] += w[t]
+
+    return out / wgt.clamp(min=1e-6)

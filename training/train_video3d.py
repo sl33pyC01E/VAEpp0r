@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""VAEpp0r Stage 2 — temporal training on animated synthetic data.
+"""VAEpp0r Stage 2 (3D) — temporal training with Cosmos-style causal 3D architecture.
 
-Enables VAE temporal compression (TPool/TGrow/MemBlock).
-Generates T-frame clips with smooth motion, trains with temporal consistency loss.
+Uses MiniVAE3D: factorized causal 3D convs, temporal + spatial attention,
+hybrid down/up sampling, optional 3D Haar patching, optional residual FSQ.
 
 Usage:
-    python -m training.train_video
-    python -m training.train_video --resume synthyper_logs/latest.pt --fresh-opt
+    python -m training.train_video3d
+    python -m training.train_video3d --resume synthyper_video3d_logs/latest.pt --fresh-opt
 """
 
 import argparse
@@ -24,7 +24,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core.model import MiniVAE
+from core.model import MiniVAE3D
 from core.generator import VAEpp0rGenerator
 from core.discriminator import PatchDiscriminator, hinge_d_loss, hinge_g_loss
 
@@ -302,120 +302,90 @@ def train(args):
     logdir = pathlib.Path(args.logdir)
     logdir.mkdir(parents=True, exist_ok=True)
 
-    # -- Model (3ch RGB, temporal ENABLED) --
-    # Read encoder/decoder/latent config from checkpoint if resuming
-    enc_ch_str = args.enc_ch
-    dec_ch = tuple(int(x) for x in args.dec_ch.split(","))
+    # -- Model (MiniVAE3D: causal 3D + optional Haar patcher + optional FSQ) --
     latent_ch = args.latent_ch
-    enc_time_str = args.enc_time
-    dec_time_str = args.dec_time
-    haar_mode = getattr(args, 'haar', 'none')
+    base_ch = args.base_ch
+    ch_mult_str = args.ch_mult
+    num_res_blocks = args.num_res_blocks
+    temporal_down_str = args.temporal_down
+    spatial_down_str = args.spatial_down
+    haar_levels = args.haar_levels
+    use_fsq = args.fsq
+    fsq_levels_str = args.fsq_levels
+    fsq_stages = args.fsq_stages
+
+    # Resume: read config from checkpoint
     _resume_cfg = {}
     if args.resume:
         _ckpt_peek = torch.load(args.resume, map_location="cpu", weights_only=False)
         _resume_cfg = _ckpt_peek.get("config", {})
-        _cfg = _resume_cfg
-        enc_ch_str = _cfg.get("encoder_channels", enc_ch_str)
-        latent_ch = _cfg.get("latent_channels", latent_ch)
-        dec_ch_str = _cfg.get("decoder_channels", args.dec_ch)
-        if isinstance(dec_ch_str, str):
-            dec_ch = tuple(int(x) for x in dec_ch_str.split(","))
-        elif isinstance(dec_ch_str, (list, tuple)):
-            dec_ch = tuple(dec_ch_str)
-        if _cfg.get("encoder_time_downscale") is not None:
-            enc_time_str = str(_cfg["encoder_time_downscale"])
-        if _cfg.get("decoder_time_upscale") is not None:
-            dec_time_str = str(_cfg["decoder_time_upscale"])
-        if _cfg.get("residual_shortcut") is not None:
-            args.residual_shortcut = bool(_cfg["residual_shortcut"])
-        if _cfg.get("use_attention") is not None:
-            args.use_attention = bool(_cfg["use_attention"])
-        if _cfg.get("use_groupnorm") is not None:
-            args.use_groupnorm = bool(_cfg["use_groupnorm"])
-        # Haar: backward compat (old checkpoints stored bool)
-        _haar_raw = _cfg.get("haar", haar_mode)
-        if _haar_raw is True:
-            haar_mode = '2x'
-        elif _haar_raw is False or _haar_raw is None:
-            haar_mode = 'none'
-        else:
-            haar_mode = str(_haar_raw)
+        latent_ch = _resume_cfg.get("latent_channels", latent_ch)
+        base_ch = _resume_cfg.get("base_channels", base_ch)
+        ch_mult_str = _resume_cfg.get("channel_mult", ch_mult_str)
+        num_res_blocks = _resume_cfg.get("num_res_blocks", num_res_blocks)
+        temporal_down_str = _resume_cfg.get("temporal_downsample", temporal_down_str)
+        spatial_down_str = _resume_cfg.get("spatial_downsample", spatial_down_str)
+        haar_levels = _resume_cfg.get("haar_levels", haar_levels)
+        use_fsq = _resume_cfg.get("fsq", use_fsq)
+        fsq_levels_str = _resume_cfg.get("fsq_levels", fsq_levels_str)
+        fsq_stages = _resume_cfg.get("fsq_stages", fsq_stages)
         del _ckpt_peek
-    # Parse encoder channels
-    if isinstance(enc_ch_str, int):
-        enc_ch = enc_ch_str
-    elif isinstance(enc_ch_str, str) and "," in enc_ch_str:
-        enc_ch = tuple(int(x) for x in enc_ch_str.split(","))
-    elif isinstance(enc_ch_str, (list, tuple)):
-        enc_ch = tuple(enc_ch_str)
-    else:
-        enc_ch = int(enc_ch_str)
-    n_stages = len(dec_ch)
-    # Haar config
-    if haar_mode is True:
-        haar_mode = '2x'
-    elif not haar_mode or haar_mode is False:
-        haar_mode = 'none'
-    haar_rounds = {'none': 0, '2x': 1, '4x': 2}.get(haar_mode, 0)
-    haar_ch_mult = 4 ** haar_rounds
-    haar_spatial_mult = 2 ** haar_rounds
-    # vae_in_ch is always derived from haar_rounds — static checkpoints save image_channels=3 (RGB), not haar-expanded
-    vae_in_ch = 3 * haar_ch_mult
-    if haar_rounds > 0:
-        print(f"Haar {haar_mode}: 3ch -> {vae_in_ch}ch ({haar_spatial_mult}x spatial pre-compression)")
-    # Parse temporal config
-    enc_t = tuple(x.strip().lower() in ("true", "1", "yes")
-                  for x in enc_time_str.split(","))
-    dec_t = tuple(x.strip().lower() in ("true", "1", "yes")
-                  for x in dec_time_str.split(","))
-    assert len(enc_t) == n_stages, \
-        f"--enc-time length {len(enc_t)} != {n_stages} stages"
-    assert len(dec_t) == n_stages, \
-        f"--dec-time length {len(dec_t)} != {n_stages} stages"
-    # Parse spatial config
-    enc_spatial_str = _resume_cfg.get("encoder_spatial_downscale",
-                                       getattr(args, 'enc_spatial', 'true,true,true'))
-    dec_spatial_str = _resume_cfg.get("decoder_spatial_upscale",
-                                       getattr(args, 'dec_spatial', 'true,true,true'))
-    if isinstance(enc_spatial_str, str):
-        enc_spatial = tuple(x.strip().lower() in ("true", "1", "yes")
-                            for x in enc_spatial_str.split(","))
-    else:
-        enc_spatial = tuple(bool(x) for x in enc_spatial_str)
-    if isinstance(dec_spatial_str, str):
-        dec_spatial = tuple(x.strip().lower() in ("true", "1", "yes")
-                            for x in dec_spatial_str.split(","))
-    else:
-        dec_spatial = tuple(bool(x) for x in dec_spatial_str)
-    if len(enc_spatial) < n_stages:
-        enc_spatial = enc_spatial + (True,) * (n_stages - len(enc_spatial))
-    if len(dec_spatial) < n_stages:
-        dec_spatial = dec_spatial + (True,) * (n_stages - len(dec_spatial))
-    enc_spatial = enc_spatial[:n_stages]
-    dec_spatial = dec_spatial[:n_stages]
 
-    model = MiniVAE(
+    def _parse_tuple_int(v):
+        if isinstance(v, (list, tuple)):
+            return tuple(int(x) for x in v)
+        return tuple(int(x.strip()) for x in str(v).split(","))
+
+    def _parse_tuple_bool(v):
+        if isinstance(v, (list, tuple)):
+            return tuple(bool(x) for x in v)
+        return tuple(x.strip().lower() in ("true", "1", "yes") for x in str(v).split(","))
+
+    ch_mult = _parse_tuple_int(ch_mult_str)
+    temporal_down = _parse_tuple_bool(temporal_down_str)
+    spatial_down = _parse_tuple_bool(spatial_down_str)
+    n_levels = len(ch_mult)
+    assert len(temporal_down) == n_levels, \
+        f"--temporal-down length {len(temporal_down)} != {n_levels} levels"
+    assert len(spatial_down) == n_levels, \
+        f"--spatial-down length {len(spatial_down)} != {n_levels} levels"
+    fsq_levels = _parse_tuple_int(fsq_levels_str)
+
+    model = MiniVAE3D(
         latent_channels=latent_ch,
-        image_channels=vae_in_ch,
-        output_channels=vae_in_ch,
-        encoder_channels=enc_ch,
-        decoder_channels=dec_ch,
-        encoder_time_downscale=enc_t,
-        decoder_time_upscale=dec_t,
-        encoder_spatial_downscale=enc_spatial,
-        decoder_spatial_upscale=dec_spatial,
-        residual_shortcut=getattr(args, 'residual_shortcut', False),
-        use_attention=getattr(args, 'use_attention', False),
-        use_groupnorm=getattr(args, 'use_groupnorm', False),
+        image_channels=3,
+        output_channels=3,
+        base_channels=base_ch,
+        channel_mult=ch_mult,
+        num_res_blocks=num_res_blocks,
+        temporal_downsample=temporal_down,
+        spatial_downsample=spatial_down,
+        attn_at_deepest=True,
+        dropout=0.0,
+        haar_levels=haar_levels,
+        fsq=use_fsq,
+        fsq_levels=fsq_levels,
+        fsq_stages=fsq_stages,
     ).to(device)
-    if args.grad_checkpoint:
-        model.use_checkpoint = True
     pc = model.param_count()
-    spatial = model.s_downscale * haar_spatial_mult
-    print(f"MiniVAE ({vae_in_ch}ch, {spatial}x spatial): {pc['total']:,} params"
-          f"{', grad-checkpoint' if args.grad_checkpoint else ''}")
-    print(f"  t_downscale={model.t_downscale}, t_upscale={model.t_upscale}, "
-          f"frames_to_trim={model.frames_to_trim}")
+    print(f"MiniVAE3D: {pc['total']:,} params  (enc {pc['encoder']:,} + dec {pc['decoder']:,})")
+    print(f"  base_ch={base_ch} mult={ch_mult} res_blocks={num_res_blocks}")
+    print(f"  temporal_down={temporal_down}  spatial_down={spatial_down}")
+    print(f"  haar_levels={haar_levels}  fsq={use_fsq}"
+          f"{f' (stages={fsq_stages}, levels={fsq_levels})' if use_fsq else ''}")
+    print(f"  t_downscale={model.t_downscale}, s_downscale={model.s_downscale}")
+
+    # Compat shims so downstream code that references old attrs still works.
+    # MiniVAE3D doesn't have t_upscale (symmetric) or frames_to_trim.
+    if not hasattr(model, 't_upscale'):
+        model.t_upscale = model.t_downscale
+    if not hasattr(model, 'frames_to_trim'):
+        model.frames_to_trim = 0
+    # Haar is now inside the model — disable training-loop Haar
+    haar_rounds = 0
+    haar_ch_mult = 1
+    haar_spatial_mult = 1
+    vae_in_ch = 3
 
     # -- Generator --
     gen = VAEpp0rGenerator(
@@ -559,13 +529,20 @@ def train(args):
     gen_bs = args.gen_batch if args.gen_batch > 0 else args.batch_size
     accum = args.grad_accum
 
-    # -- Temporal warmup: freeze spatial weights, train only TPool/TGrow/MemBlock --
+    # -- Temporal warmup: freeze spatial weights, train only temporal params --
+    # For MiniVAE3D, temporal params are (3,1,1) kernel convs and temporal attention.
     _temporal_param_names = set()
     for _mname, _mod in model.named_modules():
-        if type(_mod).__name__ in ("TPool", "TGrow", "MemBlock"):
+        # Temporal attention blocks
+        if type(_mod).__name__ == "CausalTemporalAttention":
             for _pname, _ in _mod.named_parameters(recurse=True):
-                _full = f"{_mname}.{_pname}" if _mname else _pname
-                _temporal_param_names.add(_full)
+                _temporal_param_names.add(f"{_mname}.{_pname}" if _mname else _pname)
+        # CausalConv3d with kernel_size (3,1,1) = temporal conv
+        if type(_mod).__name__ == "CausalConv3d":
+            k = _mod.conv.kernel_size
+            if k[0] > 1 and k[1] == 1 and k[2] == 1:
+                for _pname, _ in _mod.named_parameters(recurse=True):
+                    _temporal_param_names.add(f"{_mname}.{_pname}" if _mname else _pname)
 
     _in_warmup = args.warmup_steps > 0 and global_step < args.warmup_steps
     if _in_warmup:
@@ -591,23 +568,21 @@ def train(args):
     print(flush=True)
 
     def _ckpt_name(step):
-        ec_str = ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else str(enc_ch)
-        dc_str = ",".join(str(x) for x in dec_ch)
-        n_stages = len(dec_ch)
-        spatial = 2 ** n_stages
-        t_down = sum(1 for x in enc_t if x)
-        temporal = 2 ** t_down if t_down > 0 else 1
+        mult_str = "x".join(str(x) for x in ch_mult)
+        total_t = model.t_downscale
+        total_s = model.s_downscale
+        haar_tag = f"-h{haar_levels}" if haar_levels > 0 else ""
+        fsq_tag = f"-fsq{fsq_stages}" if use_fsq else ""
         steps_k = f"{step // 1000}k" if step >= 1000 else str(step)
-        return f"vae-3ch-lc{latent_ch}-ec{ec_str}-dc{dc_str}-S{spatial}x-T{temporal}x-{steps_k}.pt"
+        return (f"vae3d-lc{latent_ch}-b{base_ch}-m{mult_str}"
+                f"-S{total_s}x-T{total_t}x{haar_tag}{fsq_tag}-{steps_k}.pt")
 
-    # Glob pattern scoped to THIS run only — never touch other runs' checkpoints
-    _ec_str = ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else str(enc_ch)
-    _dc_str = ",".join(str(x) for x in dec_ch)
-    _n_stages = len(dec_ch)
-    _spatial = 2 ** _n_stages
-    _t_down = sum(1 for x in enc_t if x)
-    _temporal = 2 ** _t_down if _t_down > 0 else 1
-    _run_glob = f"vae-3ch-lc{latent_ch}-ec{_ec_str}-dc{_dc_str}-S{_spatial}x-T{_temporal}x-*.pt"
+    # Glob pattern scoped to THIS run only
+    _mult_str = "x".join(str(x) for x in ch_mult)
+    _haar_tag = f"-h{haar_levels}" if haar_levels > 0 else ""
+    _fsq_tag = f"-fsq{fsq_stages}" if use_fsq else ""
+    _run_glob = (f"vae3d-lc{latent_ch}-b{base_ch}-m{_mult_str}"
+                 f"-S{model.s_downscale}x-T{model.t_downscale}x{_haar_tag}{_fsq_tag}-*.pt")
 
     def _make_checkpoint():
         d = {
@@ -617,19 +592,19 @@ def train(args):
             "scaler": scaler.state_dict(),
             "global_step": global_step,
             "config": {
+                "model_class": "MiniVAE3D",
                 "latent_channels": latent_ch,
                 "image_channels": 3,
                 "output_channels": 3,
-                "encoder_channels": ",".join(str(x) for x in enc_ch) if isinstance(enc_ch, tuple) else enc_ch,
-                "decoder_channels": ",".join(str(x) for x in dec_ch),
-                "encoder_time_downscale": ",".join(str(x) for x in enc_t),
-                "decoder_time_upscale": ",".join(str(x) for x in dec_t),
-                "encoder_spatial_downscale": ",".join(str(s).lower() for s in enc_spatial),
-                "decoder_spatial_upscale": ",".join(str(s).lower() for s in dec_spatial),
-                "residual_shortcut": getattr(args, 'residual_shortcut', False),
-                "use_attention": getattr(args, 'use_attention', False),
-                "use_groupnorm": getattr(args, 'use_groupnorm', False),
-                "haar": haar_mode,
+                "base_channels": base_ch,
+                "channel_mult": ",".join(str(x) for x in ch_mult),
+                "num_res_blocks": num_res_blocks,
+                "temporal_downsample": ",".join(str(s).lower() for s in temporal_down),
+                "spatial_downsample": ",".join(str(s).lower() for s in spatial_down),
+                "haar_levels": haar_levels,
+                "fsq": use_fsq,
+                "fsq_levels": ",".join(str(x) for x in fsq_levels),
+                "fsq_stages": fsq_stages,
                 "temporal": True,
                 "T": args.T,
                 "synthyper_stage": 2,
@@ -846,15 +821,25 @@ def main():
     p.add_argument("--H", type=int, default=360)
     p.add_argument("--W", type=int, default=640)
     p.add_argument("--T", type=int, default=24)
-    p.add_argument("--latent-ch", type=int, default=32)
-    p.add_argument("--enc-ch", default="64",
-                   help="Encoder channel width (int or comma-separated per stage)")
-    p.add_argument("--dec-ch", default="256,128,64",
-                   help="Decoder channel widths (comma-separated, one per stage)")
-    p.add_argument("--enc-time", default="true,true,false",
-                   help="Temporal downscale per encoder stage (comma-separated bools)")
-    p.add_argument("--dec-time", default="false,true,true",
-                   help="Temporal upscale per decoder stage (comma-separated bools)")
+    p.add_argument("--latent-ch", type=int, default=16)
+    p.add_argument("--base-ch", type=int, default=64,
+                   help="Base channel width; multiplied by --ch-mult per level")
+    p.add_argument("--ch-mult", default="1,2,4,4",
+                   help="Channel multipliers per level (comma-separated ints)")
+    p.add_argument("--num-res-blocks", type=int, default=2,
+                   help="Factorized res blocks per resolution level")
+    p.add_argument("--temporal-down", default="true,true,true,false",
+                   help="Temporal 2x downsample per level (comma-separated bools)")
+    p.add_argument("--spatial-down", default="true,true,true,true",
+                   help="Spatial 2x downsample per level (comma-separated bools)")
+    p.add_argument("--haar-levels", type=int, default=0,
+                   help="3D Haar patcher levels (0=off, 1=8x, 2=64x)")
+    p.add_argument("--fsq", action="store_true",
+                   help="Enable residual FSQ quantizer in bottleneck")
+    p.add_argument("--fsq-levels", default="8,8,8,5,5,5",
+                   help="FSQ levels per dim (comma-separated ints)")
+    p.add_argument("--fsq-stages", type=int, default=4,
+                   help="Number of residual FSQ stages")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--lr", default="2e-4")
     p.add_argument("--total-steps", type=int, default=30000)
@@ -885,24 +870,12 @@ def main():
                    help="Gradient checkpointing (trade compute for memory)")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode")
-    p.add_argument("--haar", default="none", choices=["none", "2x", "4x"],
-                   help="Haar wavelet pre-compression (none/2x/4x)")
-    p.add_argument("--residual-shortcut", action="store_true",
-                   help="DC-AE style residual shortcuts (pixel_unshuffle/shuffle bypasses)")
-    p.add_argument("--use-attention", action="store_true",
-                   help="Add linear attention at deepest encoder/decoder stage")
-    p.add_argument("--use-groupnorm", action="store_true",
-                   help="Add GroupNorm inside MemBlock conv layers")
-    p.add_argument("--enc-spatial", default="true,true,true",
-                   help="Spatial downscale per encoder stage (comma-separated bools)")
-    p.add_argument("--dec-spatial", default="true,true,true",
-                   help="Spatial upscale per decoder stage (comma-separated bools)")
-    p.add_argument("--warmup-steps", type=int, default=500,
-                   help="Steps to train only temporal layers (TPool/TGrow/MemBlock) "
+    p.add_argument("--warmup-steps", type=int, default=0,
+                   help="Steps to train only temporal params (3,1,1 convs + temporal attn) "
                         "before unfreezing spatial weights. Set 0 to disable.")
     p.add_argument("--resume", default=None)
     p.add_argument("--fresh-opt", action="store_true")
-    p.add_argument("--logdir", default="synthyper_video_logs")
+    p.add_argument("--logdir", default="synthyper_video3d_logs")
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--save-every", type=int, default=5000)
     p.add_argument("--preview-every", type=int, default=100)
