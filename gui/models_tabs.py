@@ -677,8 +677,9 @@ class ConvertTab(tk.Frame):
 
         # -- 3D-specific architecture rows (hidden by default) --
         from gui.common import (MINIVAE3D_PRESETS, MINIVAE3D_PRESET_NAMES,
-                                MINIVAE3D_DEFAULT_PRESET)
+                                MINIVAE3D_DEFAULT_PRESET, estimate_latent_dims)
         self._3d_presets = MINIVAE3D_PRESETS
+        self._estimate_dims = estimate_latent_dims
         self._3d_frame = tk.Frame(top, bg=BG_PANEL)
 
         preset_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
@@ -692,6 +693,12 @@ class ConvertTab(tk.Frame):
             font=FONT_SMALL)
         self._preset3d_menu.pack(side="left", padx=(0, 8))
         self._preset3d_menu.bind("<<ComboboxSelected>>", self._apply_preset_3d)
+
+        # Dim info label
+        self.dim_info_var = tk.StringVar(value="")
+        tk.Label(preset_row, textvariable=self.dim_info_var,
+                 bg=BG_PANEL, fg=ACCENT, font=FONT_SMALL,
+                 anchor="w").pack(side="left", fill="x", expand=True)
 
         arch3d_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
         arch3d_row.pack(fill="x", pady=(5, 0))
@@ -779,16 +786,42 @@ class ConvertTab(tk.Frame):
         """Populate 3D fields from selected preset."""
         name = self.preset3d_var.get()
         preset = self._3d_presets.get(name)
-        if not preset:
-            return
-        self.latent3d_var.set(preset["latent_ch"])
-        self.base_ch_var.set(preset["base_ch"])
-        self.ch_mult_var.set(preset["ch_mult"])
-        self.num_res_var.set(preset["num_res_blocks"])
-        self.t_down3d_var.set(preset["temporal_down"])
-        self.s_down3d_var.set(preset["spatial_down"])
-        self.haar3d_var.set(preset["haar_levels"])
-        self.fsq3d_var.set(preset["fsq"])
+        if preset:
+            self.latent3d_var.set(preset["latent_ch"])
+            self.base_ch_var.set(preset["base_ch"])
+            self.ch_mult_var.set(preset["ch_mult"])
+            self.num_res_var.set(preset["num_res_blocks"])
+            self.t_down3d_var.set(preset["temporal_down"])
+            self.s_down3d_var.set(preset["spatial_down"])
+            self.haar3d_var.set(preset["haar_levels"])
+            self.fsq3d_var.set(preset["fsq"])
+        self._update_dim_info_3d()
+        if not getattr(self, "_dim_trace_wired", False):
+            for v in (self.latent3d_var, self.haar3d_var,
+                      self.t_down3d_var, self.s_down3d_var, self.fsq3d_var):
+                try:
+                    v.trace_add("write", lambda *a: self._update_dim_info_3d())
+                except Exception:
+                    pass
+            self._dim_trace_wired = True
+
+    def _update_dim_info_3d(self):
+        """Recompute 3D latent dim info from current field values."""
+        try:
+            t_down = tuple(x.strip().lower() in ("true", "1", "yes")
+                           for x in self.t_down3d_var.get().split(","))
+            s_down = tuple(x.strip().lower() in ("true", "1", "yes")
+                           for x in self.s_down3d_var.get().split(","))
+            haar = int(self.haar3d_var.get())
+            t_dn = (2 ** sum(t_down)) * (2 ** haar)
+            s_dn = (2 ** sum(s_down)) * (2 ** haar)
+            d = self._estimate_dims(
+                int(self.latent3d_var.get()), s_dn, t_dn,
+                fsq=bool(self.fsq3d_var.get()),
+                H=360, W=640)
+            self.dim_info_var.set(d["label"])
+        except Exception as e:
+            self.dim_info_var.set(f"(dim calc error: {e})")
 
     def _convert(self):
         if self.target_var.get() == "3D":
@@ -1488,8 +1521,10 @@ class VideoTrain3DTab(tk.Frame):
                  font=FONT_TITLE).pack(anchor="w")
 
         # Preset row
-        from gui.common import MINIVAE3D_PRESETS, MINIVAE3D_PRESET_NAMES, MINIVAE3D_DEFAULT_PRESET
+        from gui.common import (MINIVAE3D_PRESETS, MINIVAE3D_PRESET_NAMES,
+                                MINIVAE3D_DEFAULT_PRESET, estimate_latent_dims)
         self._presets = MINIVAE3D_PRESETS
+        self._estimate_dims = estimate_latent_dims
         preset_row = tk.Frame(top, bg=BG_PANEL)
         preset_row.pack(fill="x", pady=(10, 0))
         tk.Label(preset_row, text="Preset:", bg=BG_PANEL, fg=FG_DIM,
@@ -1501,6 +1536,12 @@ class VideoTrain3DTab(tk.Frame):
             font=FONT_SMALL)
         self._preset_menu.pack(side="left", padx=(0, 8))
         self._preset_menu.bind("<<ComboboxSelected>>", self._apply_preset)
+
+        # Latent dim info label (updates live from current field values)
+        self.dim_info_var = tk.StringVar(value="")
+        tk.Label(preset_row, textvariable=self.dim_info_var,
+                 bg=BG_PANEL, fg=ACCENT, font=FONT_SMALL,
+                 anchor="w").pack(side="left", fill="x", expand=True)
 
         # Architecture row
         arch_row = tk.Frame(top, bg=BG_PANEL)
@@ -1659,16 +1700,47 @@ class VideoTrain3DTab(tk.Frame):
         selection stick until a new preset is picked."""
         name = self.preset_var.get()
         preset = self._presets.get(name)
-        if not preset:
-            return  # Custom: leave fields alone
-        self.latent_var.set(preset["latent_ch"])
-        self.base_ch_var.set(preset["base_ch"])
-        self.ch_mult_var.set(preset["ch_mult"])
-        self.num_res_var.set(preset["num_res_blocks"])
-        self.t_down_var.set(preset["temporal_down"])
-        self.s_down_var.set(preset["spatial_down"])
-        self.haar_levels_var.set(preset["haar_levels"])
-        self.fsq_var.set(preset["fsq"])
+        if preset:
+            self.latent_var.set(preset["latent_ch"])
+            self.base_ch_var.set(preset["base_ch"])
+            self.ch_mult_var.set(preset["ch_mult"])
+            self.num_res_var.set(preset["num_res_blocks"])
+            self.t_down_var.set(preset["temporal_down"])
+            self.s_down_var.set(preset["spatial_down"])
+            self.haar_levels_var.set(preset["haar_levels"])
+            self.fsq_var.set(preset["fsq"])
+        self._update_dim_info()
+        # Wire live updates once
+        if not getattr(self, "_dim_trace_wired", False):
+            for v in (self.latent_var, self.haar_levels_var,
+                      self.t_down_var, self.s_down_var,
+                      self.fsq_var, self.fsq_stages_var, self.fsq_levels_var):
+                try:
+                    v.trace_add("write", lambda *a: self._update_dim_info())
+                except Exception:
+                    pass
+            self._dim_trace_wired = True
+
+    def _update_dim_info(self):
+        """Recompute the latent dim info label from current field values."""
+        try:
+            t_down = tuple(x.strip().lower() in ("true", "1", "yes")
+                           for x in self.t_down_var.get().split(","))
+            s_down = tuple(x.strip().lower() in ("true", "1", "yes")
+                           for x in self.s_down_var.get().split(","))
+            haar = int(self.haar_levels_var.get())
+            t_dn = (2 ** sum(t_down)) * (2 ** haar)
+            s_dn = (2 ** sum(s_down)) * (2 ** haar)
+            fsq = bool(self.fsq_var.get())
+            fsq_stages = int(self.fsq_stages_var.get())
+            fsq_levels = tuple(int(x) for x in self.fsq_levels_var.get().split(","))
+            d = self._estimate_dims(
+                int(self.latent_var.get()), s_dn, t_dn,
+                fsq=fsq, fsq_levels=fsq_levels, fsq_stages=fsq_stages,
+                H=360, W=640)
+            self.dim_info_var.set(d["label"])
+        except Exception as e:
+            self.dim_info_var.set(f"(dim calc error: {e})")
 
     def _toggle_latest(self):
         if self.use_latest_var.get():

@@ -660,3 +660,66 @@ MINIVAE3D_PRESETS = {
 
 MINIVAE3D_PRESET_NAMES = list(MINIVAE3D_PRESETS.keys())
 MINIVAE3D_DEFAULT_PRESET = "Small-Haar (~10M, 8s 4t, Haar)"
+
+
+def estimate_latent_dims(
+    latent_ch: int, s_downscale: int, t_downscale: int,
+    fsq: bool = False, fsq_levels=(8, 8, 8, 5, 5, 5), fsq_stages: int = 4,
+    H: int = 360, W: int = 640,
+):
+    """Compute latent shape + per-slot dim count + compression ratio at HxW.
+
+    Returns dict with:
+        h_lat, w_lat          - spatial latent grid
+        per_slot_vals         - values per temporal slot (continuous) or
+                                tokens per slot (discrete)
+        per_slot_bits         - storage bits per temporal slot (bf16/fp16
+                                for continuous, log2(codebook) per token
+                                for discrete)
+        raw_frame_bits        - raw 8-bit RGB bits per input frame
+        ratio                 - raw_bits / per_slot_bits over `t_downscale`
+                                input frames
+        label                 - compact one-line summary for UI display
+    """
+    import math
+    # Pad to nearest multiple of s_downscale (ceil)
+    h_lat = -(-H // s_downscale)
+    w_lat = -(-W // s_downscale)
+
+    if fsq:
+        n_channels = fsq_stages
+        codebook = 1
+        for lv in fsq_levels:
+            codebook *= int(lv)
+        bits_per_val = math.log2(codebook)
+        kind = "tokens"
+    else:
+        n_channels = latent_ch
+        bits_per_val = 16  # bf16/fp16
+        kind = "values"
+
+    per_slot_vals = n_channels * h_lat * w_lat
+    per_slot_bits = per_slot_vals * bits_per_val
+
+    # Raw: t_downscale input frames -> 1 latent slot
+    raw_t = max(t_downscale, 1)
+    raw_bits = raw_t * H * W * 3 * 8
+    ratio = raw_bits / per_slot_bits if per_slot_bits > 0 else 0.0
+
+    # Compact label
+    if fsq:
+        shape_str = f"{n_channels}x{h_lat}x{w_lat}"
+    else:
+        shape_str = f"{n_channels}x{h_lat}x{w_lat}"
+    label = (f"Latent/slot: {shape_str} = {per_slot_vals:,} {kind}  "
+             f"({per_slot_bits/8/1024:.1f} KB)  "
+             f"Raw {raw_t}f: {raw_bits/8/1024:.1f} KB  "
+             f"Compression: {ratio:.0f}x")
+    return {
+        "h_lat": h_lat, "w_lat": w_lat,
+        "per_slot_vals": per_slot_vals,
+        "per_slot_bits": per_slot_bits,
+        "raw_frame_bits": H * W * 3 * 8,
+        "ratio": ratio,
+        "label": label,
+    }
