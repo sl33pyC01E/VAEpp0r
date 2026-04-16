@@ -137,6 +137,21 @@ class RecipesMixin:
                 preset=str(seq_kwargs.get("particles_preset", "auto")),
                 n_particles=int(seq_kwargs.get("particles_n", 200)),
             )
+        # Optional raymarched 3D
+        if seq_kwargs.get("use_raymarch", False) or seq_kwargs.get("sphere_dip", False):
+            rm = self._sample_raymarch_recipe(
+                T=T,
+                n_spheres=int(seq_kwargs.get("raymarch_spheres", 2)),
+                n_boxes=int(seq_kwargs.get("raymarch_boxes", 0)),
+                n_tori=int(seq_kwargs.get("raymarch_tori", 0)),
+                march_steps=int(seq_kwargs.get("raymarch_steps", 24)),
+                sphere_dip=bool(seq_kwargs.get("sphere_dip", False)),
+            )
+            recipe["raymarch"] = rm
+            # If sphere_dip, inject impacts into the fluid block (create if missing)
+            if rm.get("sphere_dip"):
+                recipe["fluid"] = self._dip_impact_to_fluid(
+                    rm, recipe.get("fluid"))
         return recipe
 
     def build_motion_pool(self, n_clips=200, T=8, **seq_kwargs):
@@ -438,6 +453,11 @@ class RecipesMixin:
             par = recipe.get("particles")
             if par is not None and par.get("enable", False):
                 canvas = self._apply_particles(canvas, ti, par)
+
+            # Raymarched 3D primitives
+            rm = recipe.get("raymarch")
+            if rm is not None and rm.get("enable", False):
+                canvas = self._apply_raymarch(canvas, ti, rm)
 
             # Post-processing
             canvas = canvas.clamp(1e-6, 1).pow(gamma)

@@ -224,6 +224,22 @@ class GeneratorTab(tk.Frame):
         f, self.particles_n = make_slider(br_par2, "Count", 20, 1500, 200)
         f.pack(side="left")
 
+        # 3D SDF raymarch (Phase 7) - static
+        tk.Label(L, text="3D raymarch", bg=BG_PANEL, fg=ACCENT,
+                 font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
+        br_rm = tk.Frame(L, bg=BG_PANEL)
+        br_rm.pack(fill="x", pady=2)
+        self.raymarch_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(br_rm, text="Enable", variable=self.raymarch_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       font=FONT).pack(side="left")
+        br_rm2 = tk.Frame(L, bg=BG_PANEL)
+        br_rm2.pack(fill="x", pady=2)
+        f, self.raymarch_spheres = make_slider(br_rm2, "Spheres", 0, 4, 2)
+        f.pack(side="left", padx=(0, 4))
+        f, self.raymarch_steps = make_slider(br_rm2, "Steps", 8, 48, 24)
+        f.pack(side="left")
+
         # -- Bank settings --
         tk.Label(L, text="Bank", bg=BG_PANEL, fg=ACCENT,
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
@@ -420,6 +436,9 @@ class GeneratorTab(tk.Frame):
         gen.static_particles = bool(self.particles_var.get())
         gen.static_particles_preset = self.particles_preset_var.get()
         gen.static_particles_n = int(self.particles_n.get())
+        gen.static_raymarch = bool(self.raymarch_var.get())
+        gen.static_raymarch_spheres = int(self.raymarch_spheres.get())
+        gen.static_raymarch_steps = int(self.raymarch_steps.get())
 
     def gen_sample(self):
         gen = self._get_gen()
@@ -840,6 +859,22 @@ class VideoGenTab(tk.Frame):
         f, self.particles_n = make_slider(row2l, "Particle count", 20, 1500, 200)
         f.pack(side="left")
 
+        # Raymarch (Phase 7)
+        row2m = tk.Frame(top, bg=BG_PANEL)
+        row2m.pack(fill="x", pady=(2, 0))
+        self.raymarch_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2m, text="3D (SDF)", variable=self.raymarch_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       font=FONT).pack(side="left")
+        self.sphere_dip_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2m, text="Sphere dip", variable=self.sphere_dip_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       font=FONT).pack(side="left", padx=(0, 6))
+        f, self.raymarch_spheres = make_slider(row2m, "Spheres", 0, 4, 2)
+        f.pack(side="left", padx=(0, 4))
+        f, self.raymarch_steps = make_slider(row2m, "March steps", 8, 48, 24)
+        f.pack(side="left")
+
         # Buttons
         row3 = tk.Frame(top, bg=BG_PANEL)
         row3.pack(fill="x", pady=(5, 0))
@@ -951,6 +986,12 @@ class VideoGenTab(tk.Frame):
             use_particles=self.particles_var.get(),
             particles_preset=self.particles_preset_var.get(),
             particles_n=int(self.particles_n.get()),
+            use_raymarch=self.raymarch_var.get(),
+            raymarch_spheres=int(self.raymarch_spheres.get()),
+            raymarch_boxes=0,
+            raymarch_tori=0,
+            raymarch_steps=int(self.raymarch_steps.get()),
+            sphere_dip=self.sphere_dip_var.get(),
         )
 
     def build_pool(self):

@@ -28,6 +28,7 @@ from core.generator.effects import EffectsMixin
 from core.generator.text import TextMixin
 from core.generator.signage import SignageMixin
 from core.generator.particles import ParticlesMixin
+from core.generator.raymarch import RaymarchMixin
 
 
 class VAEpp0rGenerator(
@@ -41,6 +42,7 @@ class VAEpp0rGenerator(
     TextMixin,
     SignageMixin,
     ParticlesMixin,
+    RaymarchMixin,
 ):
     """GPU-accelerated procedural image generator.
 
@@ -811,6 +813,17 @@ class VAEpp0rGenerator(
             )
             # Sample at mid-life so particles are distributed
             canvas = self._apply_particles(canvas, 8, pp)
+
+        # --- Optional raymarched 3D primitives ---
+        if getattr(self, "static_raymarch", False):
+            rm = self._sample_raymarch_recipe(
+                T=1,
+                n_spheres=int(getattr(self, "static_raymarch_spheres", 2)),
+                n_boxes=int(getattr(self, "static_raymarch_boxes", 0)),
+                n_tori=int(getattr(self, "static_raymarch_tori", 0)),
+                march_steps=int(getattr(self, "static_raymarch_steps", 24)),
+            )
+            canvas = self._apply_raymarch(canvas, 0, rm)
 
         return canvas.clamp(0, 1)
 

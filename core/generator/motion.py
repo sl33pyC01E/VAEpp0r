@@ -209,7 +209,10 @@ class MotionMixin:
                            use_signage=False, signage_mode="auto",
                            signage_font_size=32,
                            use_particles=False, particles_preset="auto",
-                           particles_n=200):
+                           particles_n=200,
+                           use_raymarch=False, raymarch_spheres=2,
+                           raymarch_boxes=0, raymarch_tori=0,
+                           raymarch_steps=24, sphere_dip=False):
         """Generate animated clips with physics, viewport effects, and fluid motion.
 
         Returns: (B, T, 3, H, W) tensor in [0, 1] on self.device.
@@ -507,6 +510,15 @@ class MotionMixin:
             particles_params = self._sample_particles_recipe(
                 T=T, preset=particles_preset, n_particles=particles_n)
 
+        # Raymarch params + optional sphere-dip -> fluid impact injection
+        raymarch_params = None
+        if use_raymarch or sphere_dip:
+            raymarch_params = self._sample_raymarch_recipe(
+                T=T, n_spheres=raymarch_spheres,
+                n_boxes=raymarch_boxes, n_tori=raymarch_tori,
+                march_steps=raymarch_steps, sphere_dip=sphere_dip)
+            fluid_params = self._dip_impact_to_fluid(raymarch_params, fluid_params)
+
         # Pre-render scene template once (templates use random values internally,
         # so calling per-frame would cause flickering)
         template_canvas = None
@@ -696,6 +708,10 @@ class MotionMixin:
             # Particles (confetti, fireworks, rain, snow, sparks, embers)
             if particles_params is not None:
                 canvas = self._apply_particles(canvas, ti, particles_params)
+
+            # Raymarched 3D primitives (depth-composited over 2D canvas)
+            if raymarch_params is not None:
+                canvas = self._apply_raymarch(canvas, ti, raymarch_params)
 
             # Post-processing (consistent params across frames)
             canvas = canvas.clamp(1e-6, 1).pow(pp_gamma)
