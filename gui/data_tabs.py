@@ -801,6 +801,10 @@ class VideoGenTab(tk.Frame):
         # Checkboxes
         row2b = tk.Frame(config, bg=BG_PANEL)
         row2b.pack(fill="x", pady=(2, 0))
+        self.random_mix_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2b, text="Random mix",
+                       variable=self.random_mix_var, bg=BG_PANEL, fg="#ffaa44",
+                       selectcolor=BG_INPUT, font=FONT).pack(side="left")
         self.disco_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2b, text="Disco BG",
                        variable=self.disco_var, bg=BG_PANEL, fg=FG,
@@ -1069,6 +1073,29 @@ class VideoGenTab(tk.Frame):
         run_with_log(self, gen.build_banks, on_done=_done)
 
     def _get_seq_kwargs(self):
+        kw = self._get_seq_kwargs_raw()
+        # "Random mix" drops each enabled overlay/effect with 50% probability
+        # per call so consecutive Generate clicks produce visibly different
+        # compositions instead of "every effect, every time".
+        if getattr(self, "random_mix_var", None) and self.random_mix_var.get():
+            import random as _rnd
+            # Flags whose value is user-controllable and should be randomly
+            # dropped. Base motion (physics/rotation/zoom/fade/viewport)
+            # stays on so the scene still animates.
+            rollable = [
+                "use_fluid", "use_ripple", "use_shake", "use_kaleido",
+                "fast_transform", "use_flash", "use_palette_cycle",
+                "use_text", "use_signage", "use_particles",
+                "use_raymarch", "sphere_dip", "use_arcade",
+                "use_glitch", "use_chromatic", "use_scanlines",
+                "use_fire", "use_vortex", "use_starfield", "use_eq",
+            ]
+            for k in rollable:
+                if kw.get(k) and _rnd.random() < 0.5:
+                    kw[k] = False
+        return kw
+
+    def _get_seq_kwargs_raw(self):
         return dict(
             use_physics=self.physics_var.get(),
             use_rotation=self.rotation_var.get(),
