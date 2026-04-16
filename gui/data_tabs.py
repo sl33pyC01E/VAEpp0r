@@ -750,6 +750,10 @@ class VideoGenTab(tk.Frame):
         # Checkboxes
         row2b = tk.Frame(top, bg=BG_PANEL)
         row2b.pack(fill="x", pady=(2, 0))
+        self.disco_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2b, text="Disco BG",
+                       variable=self.disco_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, font=FONT).pack(side="left")
         self.physics_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2b, text="Physics",
                        variable=self.physics_var, bg=BG_PANEL, fg=FG,
@@ -1213,6 +1217,7 @@ class VideoGenTab(tk.Frame):
         gen = self._get_gen()
         T = self.T_var.get()
         seq_kw = self._get_seq_kwargs()
+        gen.disco_quadrant = bool(self.disco_var.get())
         self.status.config(text=f"Generating T={T} clip...")
         self.update()
 
@@ -1243,6 +1248,7 @@ class VideoGenTab(tk.Frame):
         gen = self._get_gen()
         T = self.T_var.get()
         seq_kw = self._get_seq_kwargs()
+        gen.disco_quadrant = bool(self.disco_var.get())
         self.status.config(text=f"Generating 8 clips T={T}...")
         self.update()
 
