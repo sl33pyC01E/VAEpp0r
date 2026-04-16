@@ -903,6 +903,30 @@ class VideoGenTab(tk.Frame):
                       "auto", "pong", "breakout", "invaders",
                       "snake", "tetris", "asteroids").pack(side="left", padx=(0, 6))
 
+        # Glitch / chromatic / scanlines / grain (Phase 9)
+        row2o = tk.Frame(top, bg=BG_PANEL)
+        row2o.pack(fill="x", pady=(2, 0))
+        self.glitch_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2o, text="Glitch", variable=self.glitch_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       font=FONT).pack(side="left")
+        self.chromatic_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2o, text="Chromatic", variable=self.chromatic_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       font=FONT).pack(side="left")
+        self.scanlines_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row2o, text="Scanlines", variable=self.scanlines_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       font=FONT).pack(side="left")
+        row2p = tk.Frame(top, bg=BG_PANEL)
+        row2p.pack(fill="x", pady=(2, 0))
+        f, self.glitch_n = make_slider(row2p, "Glitch bursts", 0, 10, 2)
+        f.pack(side="left", padx=(0, 4))
+        f, self.chromatic_str = make_slider(row2p, "Chromatic amt", 0, 0.05, 0.01)
+        f.pack(side="left", padx=(0, 4))
+        f, self.grain_str = make_slider(row2p, "Film grain", 0, 0.2, 0.05)
+        f.pack(side="left")
+
         # Buttons
         row3 = tk.Frame(top, bg=BG_PANEL)
         row3.pack(fill="x", pady=(5, 0))
@@ -1022,6 +1046,13 @@ class VideoGenTab(tk.Frame):
             sphere_dip=self.sphere_dip_var.get(),
             use_arcade=self.arcade_var.get(),
             arcade_mode=self.arcade_mode_var.get(),
+            use_glitch=self.glitch_var.get(),
+            glitch_n=int(self.glitch_n.get()),
+            use_chromatic=self.chromatic_var.get(),
+            chromatic_strength=float(self.chromatic_str.get()),
+            use_scanlines=self.scanlines_var.get(),
+            scanline_intensity=0.25,
+            grain_strength=float(self.grain_str.get()),
         )
 
     def build_pool(self):

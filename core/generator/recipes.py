@@ -156,6 +156,22 @@ class RecipesMixin:
         if seq_kwargs.get("use_arcade", False):
             recipe["arcade"] = self._sample_arcade_recipe(
                 T=T, mode=str(seq_kwargs.get("arcade_mode", "auto")))
+        # Optional glitch bursts
+        if seq_kwargs.get("use_glitch", False):
+            recipe["glitch"] = self._sample_glitch_recipe(
+                T=T, n_bursts=int(seq_kwargs.get("glitch_n", 2)))
+        # Optional chromatic aberration
+        if seq_kwargs.get("use_chromatic", False):
+            recipe["chromatic"] = self._sample_chromatic_recipe(
+                T=T, strength=float(seq_kwargs.get("chromatic_strength", 0.01)))
+        # Optional scanlines + film grain
+        if seq_kwargs.get("use_scanlines", False) or float(seq_kwargs.get("grain_strength", 0.0)) > 0:
+            recipe["scanline"] = self._sample_scanline_recipe(
+                T=T,
+                intensity=float(seq_kwargs.get("scanline_intensity", 0.25))
+                    if seq_kwargs.get("use_scanlines", False) else 0.0,
+                grain_strength=float(seq_kwargs.get("grain_strength", 0.0)),
+            )
         return recipe
 
     def build_motion_pool(self, n_clips=200, T=8, **seq_kwargs):
@@ -467,6 +483,21 @@ class RecipesMixin:
             ar = recipe.get("arcade")
             if ar is not None and ar.get("enable", False):
                 canvas = self._apply_arcade(canvas, ti, ar)
+
+            # Chromatic aberration
+            ca = recipe.get("chromatic")
+            if ca is not None and ca.get("enable", False):
+                canvas = self._apply_chromatic(canvas, ti, ca)
+
+            # Glitch bursts
+            gl = recipe.get("glitch")
+            if gl is not None and gl.get("enable", False):
+                canvas = self._apply_glitch(canvas, ti, gl)
+
+            # Scanlines + grain
+            sc = recipe.get("scanline")
+            if sc is not None and sc.get("enable", False):
+                canvas = self._apply_scanlines(canvas, ti, sc)
 
             # Post-processing
             canvas = canvas.clamp(1e-6, 1).pow(gamma)

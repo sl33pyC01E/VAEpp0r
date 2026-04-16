@@ -213,7 +213,11 @@ class MotionMixin:
                            use_raymarch=False, raymarch_spheres=2,
                            raymarch_boxes=0, raymarch_tori=0,
                            raymarch_steps=24, sphere_dip=False,
-                           use_arcade=False, arcade_mode="auto"):
+                           use_arcade=False, arcade_mode="auto",
+                           use_glitch=False, glitch_n=2,
+                           use_chromatic=False, chromatic_strength=0.01,
+                           use_scanlines=False, scanline_intensity=0.25,
+                           grain_strength=0.05):
         """Generate animated clips with physics, viewport effects, and fluid motion.
 
         Returns: (B, T, 3, H, W) tensor in [0, 1] on self.device.
@@ -525,6 +529,21 @@ class MotionMixin:
         if use_arcade:
             arcade_params = self._sample_arcade_recipe(T=T, mode=arcade_mode)
 
+        # Glitch / chromatic / scanline params
+        glitch_params = None
+        if use_glitch:
+            glitch_params = self._sample_glitch_recipe(T=T, n_bursts=glitch_n)
+        chromatic_params = None
+        if use_chromatic:
+            chromatic_params = self._sample_chromatic_recipe(
+                T=T, strength=chromatic_strength)
+        scanline_params = None
+        if use_scanlines or grain_strength > 0:
+            scanline_params = self._sample_scanline_recipe(
+                T=T,
+                intensity=scanline_intensity if use_scanlines else 0.0,
+                grain_strength=grain_strength)
+
         # Pre-render scene template once (templates use random values internally,
         # so calling per-frame would cause flickering)
         template_canvas = None
@@ -722,6 +741,18 @@ class MotionMixin:
             # Arcade scene overlay
             if arcade_params is not None:
                 canvas = self._apply_arcade(canvas, ti, arcade_params)
+
+            # Chromatic aberration (RGB split)
+            if chromatic_params is not None:
+                canvas = self._apply_chromatic(canvas, ti, chromatic_params)
+
+            # Glitch bursts (slice displacement + bit crush)
+            if glitch_params is not None:
+                canvas = self._apply_glitch(canvas, ti, glitch_params)
+
+            # Scanlines + film grain
+            if scanline_params is not None:
+                canvas = self._apply_scanlines(canvas, ti, scanline_params)
 
             # Post-processing (consistent params across frames)
             canvas = canvas.clamp(1e-6, 1).pow(pp_gamma)

@@ -23,6 +23,7 @@ these keys render unchanged.
 """
 
 import math
+import random
 import torch
 import torch.nn.functional as F
 
@@ -339,3 +340,117 @@ class EffectsMixin:
         if sat_boost != 1.0:
             s = (s * sat_boost).clamp(0, 1)
         return self._hsv_to_rgb_image(h, s, v)
+
+    # ------------------------------------------------------------------
+    # Glitch (horizontal slice displacement + bit-crush bursts)
+    # ------------------------------------------------------------------
+    def _sample_glitch_recipe(self, T, n_bursts=2, max_slice_h=40,
+                              max_shift=30):
+        """Schedule occasional glitch bursts — a few frames of horizontal
+        slice shifts plus brightness quantization."""
+        bursts = []
+        rng = random.Random(int(torch.randint(0, 2**31 - 1, (1,)).item()))
+        n_bursts = int(max(0, n_bursts))
+        for _ in range(n_bursts):
+            t_start = rng.randint(0, max(T - 1, 0))
+            duration = rng.randint(1, 4)
+            n_slices = rng.randint(3, 8)
+            slices = []
+            for _s in range(n_slices):
+                slices.append({
+                    "y": rng.randint(0, max(self.H - 5, 1)),
+                    "h": rng.randint(4, max_slice_h),
+                    "shift": rng.randint(-max_shift, max_shift),
+                })
+            bursts.append({
+                "t_start": int(t_start),
+                "t_end": int(t_start + duration),
+                "slices": slices,
+                "crush_levels": rng.choice([8, 16, 32, 64]),
+            })
+        return {"enable": True, "bursts": bursts}
+
+    def _apply_glitch(self, canvas, ti, gp):
+        if gp is None or not gp.get("enable", False):
+            return canvas
+        out = canvas
+        for burst in gp.get("bursts", []):
+            if not (burst["t_start"] <= ti < burst["t_end"]):
+                continue
+            # Displace slices
+            for sl in burst["slices"]:
+                y1 = int(sl["y"])
+                y2 = min(self.H, y1 + int(sl["h"]))
+                shift = int(sl["shift"])
+                if y2 <= y1:
+                    continue
+                strip = out[:, :, y1:y2, :]
+                out = out.clone()
+                out[:, :, y1:y2, :] = torch.roll(strip, shift, dims=-1)
+            # Bit-crush
+            levels = int(burst.get("crush_levels", 16))
+            out = (out * levels).round() / levels
+        return out.clamp(0, 1)
+
+    # ------------------------------------------------------------------
+    # Chromatic aberration (RGB channel radial offset)
+    # ------------------------------------------------------------------
+    def _sample_chromatic_recipe(self, T, strength=0.01):
+        return {"enable": True, "strength": float(strength),
+                "pulse_hz": float(torch.empty(1).uniform_(0.0, 0.15).item())}
+
+    def _apply_chromatic(self, canvas, ti, cp):
+        if cp is None or not cp.get("enable", False):
+            return canvas
+        self._ensure_effects_grids()
+        B, C, H, W = canvas.shape
+        strength = float(cp["strength"])
+        # Pulse modulates strength over time
+        mod = 1.0 + 0.5 * math.sin(2 * math.pi * cp.get("pulse_hz", 0.0) * ti)
+        s = strength * mod
+        nx = self._eff_nx
+        ny = self._eff_ny
+        r = (nx * nx + ny * ny).sqrt().unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        # Build per-channel grid offsets: R shifts outward, B inward, G stays.
+        base = self._eff_base_grid  # (1, H, W, 2)
+        r_grid = base + torch.stack([nx * s * r.squeeze(0).squeeze(0),
+                                      ny * s * r.squeeze(0).squeeze(0)], dim=-1).unsqueeze(0)
+        b_grid = base - torch.stack([nx * s * r.squeeze(0).squeeze(0),
+                                      ny * s * r.squeeze(0).squeeze(0)], dim=-1).unsqueeze(0)
+        r_ch = F.grid_sample(canvas[:, 0:1], r_grid.expand(B, -1, -1, -1),
+                             mode="bilinear", padding_mode="reflection",
+                             align_corners=False)
+        b_ch = F.grid_sample(canvas[:, 2:3], b_grid.expand(B, -1, -1, -1),
+                             mode="bilinear", padding_mode="reflection",
+                             align_corners=False)
+        out = torch.cat([r_ch, canvas[:, 1:2], b_ch], dim=1)
+        return out.clamp(0, 1)
+
+    # ------------------------------------------------------------------
+    # Scanlines + film grain
+    # ------------------------------------------------------------------
+    def _sample_scanline_recipe(self, T, intensity=0.25,
+                                 grain_strength=0.05):
+        return {
+            "enable": True,
+            "scanline_intensity": float(intensity),
+            "grain_strength": float(grain_strength),
+        }
+
+    def _apply_scanlines(self, canvas, ti, sp):
+        if sp is None or not sp.get("enable", False):
+            return canvas
+        B, C, H, W = canvas.shape
+        dev = canvas.device
+        # Scanlines: dim every other row by intensity
+        intensity = float(sp.get("scanline_intensity", 0.25))
+        row_mod = (torch.arange(H, device=dev) % 2).float()
+        mask = 1.0 - row_mod * intensity  # (H,)
+        mask = mask.view(1, 1, H, 1)
+        out = canvas * mask
+        # Film grain: per-frame gaussian noise
+        grain = float(sp.get("grain_strength", 0.05))
+        if grain > 0:
+            noise = torch.randn_like(canvas) * grain
+            out = (out + noise).clamp(0, 1)
+        return out
