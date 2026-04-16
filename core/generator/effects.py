@@ -346,27 +346,37 @@ class EffectsMixin:
     # ------------------------------------------------------------------
     def _sample_glitch_recipe(self, T, n_bursts=2, max_slice_h=40,
                               max_shift=30):
-        """Schedule occasional glitch bursts — a few frames of horizontal
-        slice shifts plus brightness quantization."""
+        """Schedule glitch bursts on a regular cadence so onset/offset
+        timing is *predictable* — the VAE sees a repeating pulse pattern
+        rather than i.i.d. random disruptions. Slice positions within a
+        burst stay random-at-sample-time (that randomness is the visual
+        signature of 'a glitch'), but all bursts in a clip reuse the
+        same slice layout so the model can learn the burst template."""
         bursts = []
         rng = random.Random(int(torch.randint(0, 2**31 - 1, (1,)).item()))
         n_bursts = int(max(0, n_bursts))
-        for _ in range(n_bursts):
-            t_start = rng.randint(0, max(T - 1, 0))
-            duration = rng.randint(1, 4)
-            n_slices = rng.randint(3, 8)
-            slices = []
-            for _s in range(n_slices):
-                slices.append({
-                    "y": rng.randint(0, max(self.H - 5, 1)),
-                    "h": rng.randint(4, max_slice_h),
-                    "shift": rng.randint(-max_shift, max_shift),
-                })
+        if n_bursts == 0:
+            return {"enable": True, "bursts": []}
+        # Sample ONE slice template reused by every burst in this clip
+        n_slices = rng.randint(3, 8)
+        template = []
+        for _s in range(n_slices):
+            template.append({
+                "y": rng.randint(0, max(self.H - 5, 1)),
+                "h": rng.randint(4, max_slice_h),
+                "shift": rng.randint(-max_shift, max_shift),
+            })
+        crush_levels = rng.choice([8, 16, 32, 64])
+        # Evenly space bursts across the clip on a fixed period
+        period = max(1, T // n_bursts)
+        duration = rng.randint(1, 3)  # fixed burst length per clip
+        for k in range(n_bursts):
+            t_start = k * period
             bursts.append({
                 "t_start": int(t_start),
                 "t_end": int(t_start + duration),
-                "slices": slices,
-                "crush_levels": rng.choice([8, 16, 32, 64]),
+                "slices": template,  # same layout on every burst
+                "crush_levels": crush_levels,
             })
         return {"enable": True, "bursts": bursts}
 
@@ -435,6 +445,11 @@ class EffectsMixin:
             "enable": True,
             "scanline_intensity": float(intensity),
             "grain_strength": float(grain_strength),
+            # Per-clip seed for grain so the same pattern repeats each frame.
+            # This turns what would be pure per-frame entropy into a static
+            # "dust on lens" texture that the VAE can compress as a single
+            # spatial signature instead of wasting bits on i.i.d. noise.
+            "grain_seed": int(torch.randint(0, 2**31 - 1, (1,)).item()),
         }
 
     def _apply_scanlines(self, canvas, ti, sp):
@@ -442,15 +457,18 @@ class EffectsMixin:
             return canvas
         B, C, H, W = canvas.shape
         dev = canvas.device
-        # Scanlines: dim every other row by intensity
+        # Scanlines: dim every other row by intensity (structural, constant)
         intensity = float(sp.get("scanline_intensity", 0.25))
         row_mod = (torch.arange(H, device=dev) % 2).float()
         mask = 1.0 - row_mod * intensity  # (H,)
         mask = mask.view(1, 1, H, 1)
         out = canvas * mask
-        # Film grain: per-frame gaussian noise
+        # Film grain: deterministic from per-clip seed so the SAME noise
+        # pattern appears on every frame of the clip (learnable texture,
+        # not i.i.d. entropy).
         grain = float(sp.get("grain_strength", 0.05))
         if grain > 0:
-            noise = torch.randn_like(canvas) * grain
+            g = torch.Generator(device=dev).manual_seed(int(sp["grain_seed"]))
+            noise = torch.randn(1, 1, H, W, device=dev, generator=g) * grain
             out = (out + noise).clamp(0, 1)
         return out
