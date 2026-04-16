@@ -570,3 +570,93 @@ def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
                 wgt[:, ot] += w[t]
 
     return out / wgt.clamp(min=1e-6)
+
+
+# -- MiniVAE3D presets ---------------------------------------------------------
+# Each preset configures a MiniVAE3D. Keys match the argparse flags of
+# train_video3d.py. "params" is an approximate total parameter count for
+# display-only purposes; the actual value is recomputed after instantiation.
+MINIVAE3D_PRESETS = {
+    "Custom": None,  # sentinel: no auto-populate
+
+    "Cosmos-Large (~97M, 16s 8t, Haar+FSQ)": {
+        "base_ch": 128, "ch_mult": "1,2,4,4", "num_res_blocks": 2,
+        "temporal_down": "true,false,false,false",
+        "spatial_down":  "true,true,false,false",
+        "haar_levels": 2, "fsq": True, "latent_ch": 16,
+        "params_hint": 97_280_118,
+    },
+    "Cosmos-Base (~97M, 16s 8t, Haar)": {
+        "base_ch": 128, "ch_mult": "1,2,4,4", "num_res_blocks": 2,
+        "temporal_down": "true,false,false,false",
+        "spatial_down":  "true,true,false,false",
+        "haar_levels": 2, "fsq": False, "latent_ch": 16,
+        "params_hint": 97_279_904,
+    },
+    "Cosmos-Small (~25M, 16s 8t, Haar+FSQ)": {
+        "base_ch": 64, "ch_mult": "1,2,4,4", "num_res_blocks": 2,
+        "temporal_down": "true,false,false,false",
+        "spatial_down":  "true,true,false,false",
+        "haar_levels": 2, "fsq": True, "latent_ch": 16,
+        "params_hint": 24_570_614,
+    },
+    "Medium-Haar (~26M, 16s 8t, Haar)": {
+        "base_ch": 64, "ch_mult": "1,2,4,4", "num_res_blocks": 2,
+        "temporal_down": "true,true,false,false",
+        "spatial_down":  "true,true,true,false",
+        "haar_levels": 1, "fsq": False, "latent_ch": 16,
+        "params_hint": 25_693_968,
+    },
+    "Medium (~27M, 16s 8t, no Haar)": {
+        "base_ch": 64, "ch_mult": "1,2,4,4", "num_res_blocks": 2,
+        "temporal_down": "true,true,true,false",
+        "spatial_down":  "true,true,true,true",
+        "haar_levels": 0, "fsq": False, "latent_ch": 16,
+        "params_hint": 27_241_921,
+    },
+    "Small-FSQ (~10M, 8s 4t, Haar+FSQ)": {
+        "base_ch": 48, "ch_mult": "1,2,4", "num_res_blocks": 2,
+        "temporal_down": "true,false,false",
+        "spatial_down":  "true,true,false",
+        "haar_levels": 1, "fsq": True, "latent_ch": 16,
+        "params_hint": 10_058_886,
+    },
+    "Small-Haar (~10M, 8s 4t, Haar)": {
+        "base_ch": 48, "ch_mult": "1,2,4", "num_res_blocks": 2,
+        "temporal_down": "true,false,false",
+        "spatial_down":  "true,true,false",
+        "haar_levels": 1, "fsq": False, "latent_ch": 16,
+        "params_hint": 10_058_672,
+    },
+    "Small (~11M, 8s 4t, no Haar)": {
+        "base_ch": 48, "ch_mult": "1,2,4", "num_res_blocks": 2,
+        "temporal_down": "true,true,false",
+        "spatial_down":  "true,true,true",
+        "haar_levels": 0, "fsq": False, "latent_ch": 16,
+        "params_hint": 10_841_249,
+    },
+    "Tiny-Haar (~3.5M, 8s 4t, Haar)": {
+        "base_ch": 32, "ch_mult": "1,2,4", "num_res_blocks": 1,
+        "temporal_down": "true,false,false",
+        "spatial_down":  "true,true,false",
+        "haar_levels": 1, "fsq": False, "latent_ch": 16,
+        "params_hint": 3_458_000,
+    },
+    "Tiny (~3.8M, 8s 4t, no Haar)": {
+        "base_ch": 32, "ch_mult": "1,2,4", "num_res_blocks": 1,
+        "temporal_down": "true,true,false",
+        "spatial_down":  "true,true,true",
+        "haar_levels": 0, "fsq": False, "latent_ch": 16,
+        "params_hint": 3_800_961,
+    },
+    "Pico (~2.1M, 8s 2t, no Haar)": {
+        "base_ch": 24, "ch_mult": "1,2,4", "num_res_blocks": 1,
+        "temporal_down": "true,false,false",
+        "spatial_down":  "true,true,true",
+        "haar_levels": 0, "fsq": False, "latent_ch": 16,
+        "params_hint": 2_113_121,
+    },
+}
+
+MINIVAE3D_PRESET_NAMES = list(MINIVAE3D_PRESETS.keys())
+MINIVAE3D_DEFAULT_PRESET = "Small-Haar (~10M, 8s 4t, Haar)"

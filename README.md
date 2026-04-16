@@ -22,10 +22,46 @@ https://github.com/user-attachments/assets/8b2cbde3-8ad3-4c39-abf1-2c5f3cfcdb01
 
 ## Architecture
 
+Two VAE families are provided:
+
+### MiniVAE (2D + MemBlock)
+
+Original architecture built on [TAEHV](https://github.com/madebyollin/taehv). Processes frames as a 2D batch `(N*T, C, H, W)` with per-frame causal state carried through `MemBlock` (current + previous frame concat → conv). `TPool`/`TGrow` handle temporal stride via 1x1 channel-stacking.
+
 - 8x spatial compression, configurable 1-4x temporal compression
 - Configurable latent channels (3-32), encoder/decoder widths
-- Optional FSQ (Finite Scalar Quantization) for discrete latent tokens
-- Flatten/Deflatten bottleneck for 1D latent serialization (for downstream world models)
+- Optional DC-AE residual shortcuts, spatial linear attention, GroupNorm
+- Optional Haar wavelet 2x/4x spatial pre-compression
+- Optional FSQ post-hoc quantization (via `experiments/fsq.py`)
+- Flatten/Deflatten bottleneck for 1D latent serialization (downstream world models)
+
+### MiniVAE3D (causal 3D, Cosmos-style)
+
+Native 5D tensor architecture `(B, C, T, H, W)` with learned temporal kernels at every layer — no 2D reshape trick. Directly inspired by NVIDIA's Cosmos-Tokenizer paper (Agarwal et al., 2025), adapted for much smaller compute budget and 360p-focused training.
+
+- **Causal 3D convolutions** — first frame replicated in temporal pad so no future-frame leakage
+- **Factorized res blocks** — spatial `(1,3,3)` then temporal `(3,1,1)` convs, sequential not fused
+- **Causal temporal attention** at bottleneck — lower-triangular mask, per-spatial-location
+- **Hybrid down/up sampling** — strided conv + avg pool, summed (more stable gradients than pure conv)
+- **Optional 3D Haar patcher** — lossless 8x per level (spatial 2x2 + temporal 2x), acts as a free frequency-domain front-end
+- **Optional residual FSQ** — N stacked FSQuantizer stages each operating on the residual of the previous, no codebook (deterministic `round()` + straight-through gradient)
+
+### Parameter counts
+
+All values are for RGB input/output (3 channels in, 3 channels out). Total compression is `temporal × spatial × spatial`.
+
+| Config | Base ch | Mult | Haar | FSQ | Compression | Params |
+|--------|--------:|------|------|-----|-------------|-------:|
+| **MiniVAE Pico** (2D) | — | — | no | no | 8s | 1.0M |
+| **MiniVAE Nano** (2D) | — | — | no | no | 8s | 1.2M |
+| **MiniVAE Small** (2D) | 64 | 256,128,64 | no | no | 8s × 4t | 4.0M |
+| **MiniVAE Medium** (2D) | 64 | 256,128,64 | no | no | 8s × 4t | 11.3M |
+| **MiniVAE3D Tiny** | 48 | 1,2,4 | 1 lvl | no | 16s × 8t | 11.1M |
+| **MiniVAE3D Base** | 64 | 1,2,4,4 | no | no | 16s × 8t | 27.6M |
+| **MiniVAE3D Large** | 128 | 1,2,4,4 | 2 lvl | yes (4 stage) | 16s × 8t | 98.0M |
+| Cosmos-Tokenize1-DV8x16x16 (NVIDIA) | 128 | 1,2,4,4 | 2 lvl | yes (4 stage) | 16s × 8t | 105M |
+
+The Large preset is deliberately configured to nearly match Cosmos at the same compression ratio, so you can run apples-to-apples comparisons on your own data.
 
 ## Procedural Generator
 
@@ -63,30 +99,22 @@ Physics-driven motion (gravity, velocity, bounce), viewport transforms (pan, zoo
 
 | Stage | Data | Temporal | Description |
 |-------|------|----------|-------------|
-| 1 | Static synthetic | No | RGB image reconstruction |
-| 2 | Temporal synthetic | 4x | Video reconstruction with temporal consistency |
-| 3 | FSQ | Optional | Quantize continuous latent to discrete tokens |
-| 4 | Flatten | Optional | 1D bottleneck for sequence input |
+| 1 | Static synthetic | No | RGB image reconstruction (MiniVAE) |
+| 2 (2D) | Temporal synthetic | 1-4x | Video with MemBlock per-frame causal state |
+| 2 (3D) | Temporal synthetic | 2-16x | MiniVAE3D causal 3D with full temporal modeling |
+| 3 | Flatten | Optional | 1D bottleneck for sequence input (downstream world models) |
+
+FSQ is now an inline option during Stage 2 (3D) training rather than a separate pass.
 
 ## GUI
 
 Tkinter desktop app with nested tab layout:
 
 - **Data** -- Static generator controls, video generator with motion pool
-- **Models** -- Training, inference, checkpoint conversion (static + video)
-- **Compress** -- FSQ quantization, flatten/deflatten experiments (static + video)
+- **Models** -- Static train/inf, convert, **Video Train** (2D+MemBlock), **Video Train 3D** (causal 3D), Video Inf
+- **Compress** -- Flatten/deflatten experiments for 1D latent serialization
 
 All tabs support disco quadrant mode, resume from checkpoint, and auto-save inference outputs.
-
-## Model Presets
-
-| Preset | Channels | Latent | Params | Size |
-|--------|----------|--------|--------|------|
-| Pico | 3 | 4 | 1.0M | 4 MB |
-| Nano | 3 | 8 | 1.2M | 5 MB |
-| Tiny | 3 | 16 | 3.3M | 13 MB |
-| Small | 3 | 16 | 4.0M | 16 MB |
-| Medium | 3 | 32 | 11.3M | 43 MB |
 
 ## Usage
 
@@ -112,11 +140,14 @@ gui.bat
 # Train static VAE (Stage 1)
 python -m training.train_static --disco
 
-# Train temporal VAE (Stage 2)
+# Train temporal VAE (Stage 2, 2D + MemBlock)
 python -m training.train_video --disco
 
-# FSQ quantization
-python -m experiments.fsq --vae-ckpt synthyper_logs/latest.pt
+# Train temporal VAE (Stage 2, causal 3D — Cosmos-style)
+python -m training.train_video3d --disco --base-ch 64 --ch-mult 1,2,4,4
+
+# Cosmos-like large config with Haar + residual FSQ
+python -m training.train_video3d --disco --base-ch 128 --ch-mult 1,2,4,4 --haar-levels 2 --fsq
 
 # Flatten experiment
 python -m experiments.flatten --vae-ckpt synthyper_logs/latest.pt
@@ -166,7 +197,8 @@ pretrained/             # Pretrained checkpoints
 
 ## Acknowledgments
 
-- **[TAEHV](https://github.com/madebyollin/taehv)** by madebyollin — the causal temporal VAE architecture (MemBlock, TPool, TGrow) that this project builds on
+- **[TAEHV](https://github.com/madebyollin/taehv)** by madebyollin — the causal temporal VAE architecture (MemBlock, TPool, TGrow) that MiniVAE builds on
+- **[Cosmos Tokenizer](https://github.com/NVIDIA/Cosmos-Tokenizer)** & **[Cosmos World Foundation Model Platform](https://arxiv.org/abs/2501.03575)** (Agarwal et al., 2025) — the causal 3D tokenizer design (factorized convolutions, causal temporal attention, hybrid down/up sampling, 3D Haar patching, residual FSQ) that MiniVAE3D adapts to a smaller, 360p-focused budget
 - **[Revisiting Dead Leaves Model: Training with Synthetic Data](https://ieeexplore.ieee.org/document/9633158/)** (Madhusudana et al., 2021) — demonstrated that neural networks trained on procedural dead leaves images can approach the performance of networks trained on real data
 - **[Finite Scalar Quantization: VQ-VAE Made Simple](https://arxiv.org/abs/2309.15505)** (Mentzer et al., ICLR 2024) — the FSQ quantization method used for discrete latent tokens
 

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from tkinter import ttk
 from pathlib import Path
 
 import numpy as np
@@ -597,11 +598,27 @@ class ConvertTab(tk.Frame):
         tk.Label(top, text="Checkpoint Converter", bg=BG_PANEL, fg=FG,
                  font=FONT_TITLE).pack(anchor="w")
 
-        tk.Label(top, text="Inflate a Stage 1 (static) checkpoint into a "
-                 "Stage 2 (temporal) checkpoint.\nSpatial weights transfer, "
-                 "temporal weights initialize fresh.",
+        tk.Label(top, text="Inflate a Stage 1 (static) checkpoint into a Stage 2 "
+                 "(temporal) checkpoint.\n"
+                 "2D target: TAEHV-style MiniVAE. 3D target: MiniVAE3D "
+                 "(causal 3D). Transferable spatial weights copy over; "
+                 "temporal and structurally-new weights reinit fresh.",
                  bg=BG_PANEL, fg=FG_DIM, font=FONT_SMALL,
                  justify="left").pack(anchor="w", pady=(5, 10))
+
+        # Target mode row
+        mode_row = tk.Frame(top, bg=BG_PANEL)
+        mode_row.pack(fill="x", pady=(0, 8))
+        tk.Label(mode_row, text="Target:", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(side="left", padx=(0, 6))
+        self.target_var = tk.StringVar(value="2D")
+        for label, val in [("2D temporal (MiniVAE)", "2D"),
+                           ("3D causal (MiniVAE3D)", "3D")]:
+            tk.Radiobutton(mode_row, text=label, variable=self.target_var,
+                           value=val, bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                           activebackground=BG_PANEL, font=FONT_SMALL,
+                           command=self._on_target_change).pack(side="left",
+                                                                padx=(0, 10))
 
         row1 = tk.Frame(top, bg=BG_PANEL)
         row1.pack(fill="x", pady=(5, 0))
@@ -619,8 +636,12 @@ class ConvertTab(tk.Frame):
         make_btn(row2, "Browse", self._browse_dst, BLUE, width=8).pack(
             side="left", pady=(15, 0))
 
-        row3 = tk.Frame(top, bg=BG_PANEL)
-        row3.pack(fill="x", pady=(5, 0))
+        # -- 2D-specific architecture rows --
+        self._2d_frame = tk.Frame(top, bg=BG_PANEL)
+        self._2d_frame.pack(fill="x", pady=(5, 0))
+
+        row3 = tk.Frame(self._2d_frame, bg=BG_PANEL)
+        row3.pack(fill="x")
         f, self.latent_var = make_spin(row3, "Latent ch", default=32, width=6)
         f.pack(side="left", padx=(0, 10))
 
@@ -638,7 +659,7 @@ class ConvertTab(tk.Frame):
                      bg=BG, fg=FG, insertbackground=FG,
                      relief="flat").pack()
 
-        row3b = tk.Frame(top, bg=BG_PANEL)
+        row3b = tk.Frame(self._2d_frame, bg=BG_PANEL)
         row3b.pack(fill="x", pady=(5, 0))
         for label, attr, default in [
             ("Enc spatial downscale", "enc_s_var", "1,1,1"),
@@ -654,6 +675,54 @@ class ConvertTab(tk.Frame):
                      bg=BG, fg=FG, insertbackground=FG,
                      relief="flat").pack()
 
+        # -- 3D-specific architecture rows (hidden by default) --
+        from gui.common import (MINIVAE3D_PRESETS, MINIVAE3D_PRESET_NAMES,
+                                MINIVAE3D_DEFAULT_PRESET)
+        self._3d_presets = MINIVAE3D_PRESETS
+        self._3d_frame = tk.Frame(top, bg=BG_PANEL)
+
+        preset_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
+        preset_row.pack(fill="x", pady=(0, 4))
+        tk.Label(preset_row, text="Preset:", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(side="left", padx=(0, 4))
+        self.preset3d_var = tk.StringVar(value=MINIVAE3D_DEFAULT_PRESET)
+        self._preset3d_menu = ttk.Combobox(
+            preset_row, textvariable=self.preset3d_var,
+            values=MINIVAE3D_PRESET_NAMES, state="readonly", width=45,
+            font=FONT_SMALL)
+        self._preset3d_menu.pack(side="left", padx=(0, 8))
+        self._preset3d_menu.bind("<<ComboboxSelected>>", self._apply_preset_3d)
+
+        arch3d_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
+        arch3d_row.pack(fill="x", pady=(5, 0))
+        f, self.latent3d_var = make_spin(arch3d_row, "Latent ch", default=16)
+        f.pack(side="left", padx=(0, 10))
+        f, self.base_ch_var = make_spin(arch3d_row, "Base ch", default=48)
+        f.pack(side="left", padx=(0, 10))
+        f, self.ch_mult_var = make_float(arch3d_row, "Ch mult", "1,2,4", width=12)
+        f.pack(side="left", padx=(0, 10))
+        f, self.num_res_var = make_spin(arch3d_row, "Res blocks", default=2)
+        f.pack(side="left")
+
+        ts3d_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
+        ts3d_row.pack(fill="x", pady=(5, 0))
+        f, self.t_down3d_var = make_float(ts3d_row, "Temporal down",
+                                          "true,false,false", width=22)
+        f.pack(side="left", padx=(0, 10))
+        f, self.s_down3d_var = make_float(ts3d_row, "Spatial down",
+                                          "true,true,false", width=22)
+        f.pack(side="left", padx=(0, 10))
+
+        fs3d_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
+        fs3d_row.pack(fill="x", pady=(5, 0))
+        f, self.haar3d_var = make_spin(fs3d_row, "Haar levels", default=1)
+        f.pack(side="left", padx=(0, 10))
+        self.fsq3d_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(fs3d_row, text="FSQ", variable=self.fsq3d_var,
+                       bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
+                       activebackground=BG_PANEL, activeforeground=FG,
+                       font=FONT_SMALL).pack(side="left", padx=(0, 10))
+
         btn_row = tk.Frame(top, bg=BG_PANEL)
         btn_row.pack(fill="x", pady=(10, 0))
         make_btn(btn_row, "Convert", self._convert, GREEN).pack(
@@ -662,6 +731,10 @@ class ConvertTab(tk.Frame):
 
         self.log = make_log(self)
         self.log.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Initialize field visibility + default preset
+        self._apply_preset_3d()
+        self._on_target_change()
 
     def _browse_src(self):
         from tkinter import filedialog
@@ -682,7 +755,45 @@ class ConvertTab(tk.Frame):
         self.log.insert(tk.END, text + "\n")
         self.log.see(tk.END)
 
+    def _on_target_change(self):
+        """Show/hide 2D vs 3D architecture rows and swap the default output
+        path to the appropriate logdir."""
+        mode = self.target_var.get()
+        if mode == "3D":
+            self._2d_frame.pack_forget()
+            self._3d_frame.pack(fill="x", pady=(5, 0))
+            # Swap default output path if still pointing at the 2D logdir
+            cur = self.dst_var.get()
+            if cur.endswith(os.path.join("synthyper_video_logs", "converted.pt")):
+                self.dst_var.set(os.path.join(
+                    PROJECT_ROOT, "synthyper_video3d_logs", "converted.pt"))
+        else:
+            self._3d_frame.pack_forget()
+            self._2d_frame.pack(fill="x", pady=(5, 0))
+            cur = self.dst_var.get()
+            if cur.endswith(os.path.join("synthyper_video3d_logs", "converted.pt")):
+                self.dst_var.set(os.path.join(
+                    PROJECT_ROOT, "synthyper_video_logs", "converted.pt"))
+
+    def _apply_preset_3d(self, event=None):
+        """Populate 3D fields from selected preset."""
+        name = self.preset3d_var.get()
+        preset = self._3d_presets.get(name)
+        if not preset:
+            return
+        self.latent3d_var.set(preset["latent_ch"])
+        self.base_ch_var.set(preset["base_ch"])
+        self.ch_mult_var.set(preset["ch_mult"])
+        self.num_res_var.set(preset["num_res_blocks"])
+        self.t_down3d_var.set(preset["temporal_down"])
+        self.s_down3d_var.set(preset["spatial_down"])
+        self.haar3d_var.set(preset["haar_levels"])
+        self.fsq3d_var.set(preset["fsq"])
+
     def _convert(self):
+        if self.target_var.get() == "3D":
+            return self._convert_3d()
+
         self.log.delete("1.0", tk.END)
         src = self.src_var.get().strip()
         dst = self.dst_var.get().strip()
@@ -836,6 +947,141 @@ class ConvertTab(tk.Frame):
         size_mb = os.path.getsize(dst) / 1e6
         self._log(f"\nSaved: {dst} ({size_mb:.1f} MB)")
         self._log("Done. Use this as --resume for Video Training.")
+
+    def _convert_3d(self):
+        """Convert a Stage 1 (2D MiniVAE static) checkpoint into a MiniVAE3D
+        Stage 2 checkpoint with shape-based best-effort weight transfer.
+
+        Most of MiniVAE3D won't match MiniVAE's 2D layer topology, so the
+        bulk of weights reinit fresh. We copy any (out, in, 3, 3) 2D conv
+        weights into matching (out, in, 1, 3, 3) 3D spatial-only convs
+        by shape identity, so first/last convs of the spatial path can
+        carry over. Everything else starts fresh.
+        """
+        self.log.delete("1.0", tk.END)
+        src = self.src_var.get().strip()
+        dst = self.dst_var.get().strip()
+
+        if not src or not os.path.exists(src):
+            self._log(f"Source not found: {src}")
+            return
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+        sys.path.insert(0, PROJECT_ROOT)
+        from core.model import MiniVAE3D
+
+        # -- Load source (2D static MiniVAE) --
+        self._log(f"Loading source: {src}")
+        try:
+            ckpt = torch.load(src, map_location="cpu", weights_only=False)
+            src_sd = ckpt["model"] if "model" in ckpt else ckpt
+            src_config = ckpt.get("config", {})
+            src_step = ckpt.get("global_step", 0)
+            self._log(f"  Step: {src_step}")
+        except Exception as e:
+            self._log(f"  Error: {e}")
+            return
+
+        # -- Parse 3D target config from UI --
+        latent_ch = int(self.latent3d_var.get())
+        base_ch = int(self.base_ch_var.get())
+        try:
+            ch_mult = tuple(int(x) for x in self.ch_mult_var.get().split(","))
+            t_down = tuple(x.strip().lower() in ("true", "1", "yes")
+                           for x in self.t_down3d_var.get().split(","))
+            s_down = tuple(x.strip().lower() in ("true", "1", "yes")
+                           for x in self.s_down3d_var.get().split(","))
+        except Exception as e:
+            self._log(f"Bad config parse: {e}")
+            return
+        num_res = int(self.num_res_var.get())
+        haar_lv = int(self.haar3d_var.get())
+        fsq = bool(self.fsq3d_var.get())
+
+        self._log(f"\nBuilding MiniVAE3D:")
+        self._log(f"  latent_ch={latent_ch}  base_ch={base_ch}  ch_mult={ch_mult}")
+        self._log(f"  temporal_down={t_down}  spatial_down={s_down}")
+        self._log(f"  haar_levels={haar_lv}  fsq={fsq}  res_blocks={num_res}")
+
+        try:
+            model = MiniVAE3D(
+                latent_channels=latent_ch,
+                image_channels=3, output_channels=3,
+                base_channels=base_ch, channel_mult=ch_mult,
+                num_res_blocks=num_res,
+                temporal_downsample=t_down, spatial_downsample=s_down,
+                attn_at_deepest=True, haar_levels=haar_lv, fsq=fsq,
+            )
+        except Exception as e:
+            self._log(f"  Error building model: {e}")
+            return
+        pc = model.param_count()
+        self._log(f"  Params: {pc['total']:,}  (enc {pc['encoder']:,} + dec {pc['decoder']:,})")
+        self._log(f"  t_downscale={model.t_downscale}, s_downscale={model.s_downscale}")
+
+        # -- Best-effort weight transfer by shape identity --
+        # MiniVAE 2D conv weights: (out, in, 3, 3)
+        # MiniVAE3D spatial conv weights: (out, in, 1, 3, 3) living inside
+        # CausalConv3d.conv.weight. We scan and transfer the first matching
+        # (out, in) pair for each.
+        target_sd = model.state_dict()
+        src_convs_2d = [(k, v) for k, v in src_sd.items()
+                        if v.ndim == 4 and v.shape[-2:] == (3, 3)]
+        transferred = 0
+        used_src = set()
+        for k_t, v_t in target_sd.items():
+            if v_t.ndim != 5:
+                continue
+            # Only (out, in, 1, 3, 3) spatial convs are transfer targets
+            if v_t.shape[-3:] != (1, 3, 3):
+                continue
+            out_c, in_c = v_t.shape[0], v_t.shape[1]
+            for i, (k_s, v_s) in enumerate(src_convs_2d):
+                if i in used_src:
+                    continue
+                if v_s.shape[0] == out_c and v_s.shape[1] == in_c:
+                    # Inflate: (out, in, 3, 3) -> (out, in, 1, 3, 3)
+                    target_sd[k_t] = v_s.unsqueeze(2).contiguous()
+                    used_src.add(i)
+                    transferred += 1
+                    break
+
+        model.load_state_dict(target_sd)
+        total_targets = sum(1 for v in target_sd.values()
+                            if v.ndim == 5 and v.shape[-3:] == (1, 3, 3))
+        self._log(f"\nWeight transfer (shape-based, best effort):")
+        self._log(f"  Transferred 2D conv weights into 3D spatial slots: "
+                  f"{transferred} / {total_targets}")
+        self._log(f"  Remaining params initialized fresh (temporal, attn, "
+                  f"FactorizedResBlock structure differs from MiniVAE).")
+
+        # -- Save as MiniVAE3D checkpoint --
+        out_ckpt = {
+            "model": model.state_dict(),
+            "optimizer": None,
+            "global_step": 0,
+            "config": {
+                "model_class": "MiniVAE3D",
+                "latent_channels": latent_ch,
+                "image_channels": 3,
+                "output_channels": 3,
+                "base_channels": base_ch,
+                "channel_mult": ",".join(str(x) for x in ch_mult),
+                "num_res_blocks": num_res,
+                "temporal_downsample": ",".join(str(s).lower() for s in t_down),
+                "spatial_downsample":  ",".join(str(s).lower() for s in s_down),
+                "haar_levels": haar_lv,
+                "fsq": fsq,
+                "temporal": True,
+                "synthyper_stage": 2,
+                "converted_from": src,
+                "converted_from_step": src_step,
+            },
+        }
+        torch.save(out_ckpt, dst)
+        size_mb = os.path.getsize(dst) / 1e6
+        self._log(f"\nSaved: {dst} ({size_mb:.1f} MB)")
+        self._log("Done. Use this as --resume for Video Training 3D.")
 
     def _verify(self):
         """Verify a converted checkpoint loads correctly."""
@@ -1241,6 +1487,21 @@ class VideoTrain3DTab(tk.Frame):
         tk.Label(top, text="Video Training 3D (MiniVAE3D)", bg=BG_PANEL, fg=FG,
                  font=FONT_TITLE).pack(anchor="w")
 
+        # Preset row
+        from gui.common import MINIVAE3D_PRESETS, MINIVAE3D_PRESET_NAMES, MINIVAE3D_DEFAULT_PRESET
+        self._presets = MINIVAE3D_PRESETS
+        preset_row = tk.Frame(top, bg=BG_PANEL)
+        preset_row.pack(fill="x", pady=(10, 0))
+        tk.Label(preset_row, text="Preset:", bg=BG_PANEL, fg=FG_DIM,
+                 font=FONT_SMALL).pack(side="left", padx=(0, 4))
+        self.preset_var = tk.StringVar(value=MINIVAE3D_DEFAULT_PRESET)
+        self._preset_menu = ttk.Combobox(
+            preset_row, textvariable=self.preset_var,
+            values=MINIVAE3D_PRESET_NAMES, state="readonly", width=45,
+            font=FONT_SMALL)
+        self._preset_menu.pack(side="left", padx=(0, 8))
+        self._preset_menu.bind("<<ComboboxSelected>>", self._apply_preset)
+
         # Architecture row
         arch_row = tk.Frame(top, bg=BG_PANEL)
         arch_row.pack(fill="x", pady=(10, 0))
@@ -1390,6 +1651,24 @@ class VideoTrain3DTab(tk.Frame):
         self.runner = ProcRunner(self.log)
 
         self._check_preview()
+        # Apply default preset so fields start in a sensible state
+        self._apply_preset()
+
+    def _apply_preset(self, event=None):
+        """Populate arch fields from the selected preset. Changes after
+        selection stick until a new preset is picked."""
+        name = self.preset_var.get()
+        preset = self._presets.get(name)
+        if not preset:
+            return  # Custom: leave fields alone
+        self.latent_var.set(preset["latent_ch"])
+        self.base_ch_var.set(preset["base_ch"])
+        self.ch_mult_var.set(preset["ch_mult"])
+        self.num_res_var.set(preset["num_res_blocks"])
+        self.t_down_var.set(preset["temporal_down"])
+        self.s_down_var.set(preset["spatial_down"])
+        self.haar_levels_var.set(preset["haar_levels"])
+        self.fsq_var.set(preset["fsq"])
 
     def _toggle_latest(self):
         if self.use_latest_var.get():
