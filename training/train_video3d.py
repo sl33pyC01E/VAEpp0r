@@ -440,10 +440,11 @@ def train(args):
             print("WARNING: pip install lpips")
 
     # -- Optimizer --
-    opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr),
-                            weight_decay=0.01)
+    lr = float(args.lr)
+    lr_min = float(args.lr_min) if args.lr_min else lr  # default: no decay
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-        opt, T_max=args.total_steps, eta_min=float(args.lr) * 0.01)
+        opt, T_max=args.total_steps, eta_min=lr_min)
 
     # -- Resume --
     global_step = 0
@@ -502,11 +503,9 @@ def train(args):
         print(f"Resumed from {args.resume} at step {global_step}")
 
     if args.fresh_opt and global_step > 0:
-        opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr),
-                                weight_decay=0.01)
+        opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=args.total_steps - global_step,
-            eta_min=float(args.lr) * 0.01)
+            opt, T_max=args.total_steps - global_step, eta_min=lr_min)
         print(f"  Fresh optimizer from step {global_step}")
 
     # -- Precision --
@@ -521,7 +520,7 @@ def train(args):
         else:
             # Fallback for old checkpoints: rebuild at correct position
             sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-                opt, T_max=args.total_steps, eta_min=float(args.lr) * 0.01,
+                opt, T_max=args.total_steps, eta_min=lr_min,
                 last_epoch=global_step)
         if ckpt.get("scaler") and args.precision == "fp16":
             scaler.load_state_dict(ckpt["scaler"])
@@ -549,9 +548,9 @@ def train(args):
         for _n, _p in model.named_parameters():
             _p.requires_grad_(_n in _temporal_param_names)
         _warmup_params = [p for p in model.parameters() if p.requires_grad]
-        opt = torch.optim.AdamW(_warmup_params, lr=float(args.lr), weight_decay=0.01)
+        opt = torch.optim.AdamW(_warmup_params, lr=lr, weight_decay=0.01)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=args.total_steps, eta_min=float(args.lr) * 0.01,
+            opt, T_max=args.total_steps, eta_min=lr_min,
             last_epoch=global_step - 1 if global_step > 0 else -1)
         _steps_left = args.warmup_steps - global_step
         print(f"Warmup: spatial frozen, training {len(_warmup_params)} temporal param tensors "
@@ -761,11 +760,10 @@ def train(args):
             print("Warmup complete — unfreezing all parameters", flush=True)
             for _p in model.parameters():
                 _p.requires_grad_(True)
-            opt = torch.optim.AdamW(model.parameters(), lr=float(args.lr),
+            opt = torch.optim.AdamW(model.parameters(), lr=lr,
                                     weight_decay=0.01)
             sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-                opt, T_max=args.total_steps - global_step,
-                eta_min=float(args.lr) * 0.01)
+                opt, T_max=args.total_steps - global_step, eta_min=lr_min)
 
         # -- Log --
         if global_step % args.log_every == 0:
@@ -842,6 +840,9 @@ def main():
                    help="Number of residual FSQ stages")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--lr", default="1e-5")
+    p.add_argument("--lr-min", default=None,
+                   help="Cosine annealing floor LR (default: same as --lr, "
+                        "i.e. no decay). Set e.g. 1e-7 to decay.")
     p.add_argument("--total-steps", type=int, default=30000)
     p.add_argument("--precision", default="bf16",
                    choices=["fp16", "bf16", "fp32"])
