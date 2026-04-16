@@ -1278,8 +1278,15 @@ class VideoGenTab(tk.Frame):
         def _gen():
             if gen.base_layers is None:
                 gen.build_base_layers()
+            # Each Phase 1-10 effect samples ONE set of params per
+            # generate_sequence call and applies it across the whole batch,
+            # so calling with B=8 once yields 8 visually-identical clips
+            # whenever any effect is enabled. Call with B=1 eight times so
+            # each slot gets fresh recipe params (and fresh base composite).
             with torch.no_grad():
-                clips = gen.generate_sequence(8, T=T, **seq_kw)
+                clip_list = [gen.generate_sequence(1, T=T, **seq_kw)[0]
+                             for _ in range(8)]
+            clips = torch.stack(clip_list, dim=0)
             H, W = gen.H, gen.W
             sh, sw = H // 2, W // 2
             gap = 2
