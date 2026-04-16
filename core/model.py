@@ -715,7 +715,11 @@ class FSQuantizer(nn.Module):
         basis = torch.cumprod(torch.tensor([1] + list(levels[:-1])), dim=0).long()
         self.register_buffer("basis", basis)
         self.dim = len(levels)
-        self.codebook_size = int(torch.prod(self.levels).item())
+        # Compute from the Python list directly so this works on meta device
+        cb = 1
+        for lv in levels:
+            cb *= int(lv)
+        self.codebook_size = cb
 
     def _bound(self, z, eps=1e-3):
         shape = [1, -1] + [1] * (z.ndim - 2)

@@ -662,6 +662,39 @@ MINIVAE3D_PRESET_NAMES = list(MINIVAE3D_PRESETS.keys())
 MINIVAE3D_DEFAULT_PRESET = "Small-Haar (~10M, 8s 4t, Haar)"
 
 
+_PARAM_CACHE = {}
+
+
+def estimate_param_count(latent_ch, base_ch, ch_mult, num_res_blocks,
+                         temporal_down, spatial_down, haar_levels, fsq,
+                         fsq_levels=(8, 8, 8, 5, 5, 5), fsq_stages=4):
+    """Instantiate a MiniVAE3D on meta device and return exact param count.
+    Results cached by config tuple."""
+    import torch
+    key = (latent_ch, base_ch, tuple(ch_mult), num_res_blocks,
+           tuple(temporal_down), tuple(spatial_down),
+           haar_levels, bool(fsq), tuple(fsq_levels), fsq_stages)
+    if key in _PARAM_CACHE:
+        return _PARAM_CACHE[key]
+    try:
+        from core.model import MiniVAE3D
+        with torch.device("meta"):
+            m = MiniVAE3D(
+                latent_channels=latent_ch, image_channels=3, output_channels=3,
+                base_channels=base_ch, channel_mult=tuple(ch_mult),
+                num_res_blocks=num_res_blocks,
+                temporal_downsample=tuple(temporal_down),
+                spatial_downsample=tuple(spatial_down),
+                haar_levels=haar_levels, fsq=fsq,
+                fsq_levels=tuple(fsq_levels), fsq_stages=fsq_stages,
+            )
+        p = sum(x.numel() for x in m.parameters())
+    except Exception:
+        p = 0
+    _PARAM_CACHE[key] = p
+    return p
+
+
 def estimate_latent_dims(
     latent_ch: int, s_downscale: int, t_downscale: int,
     fsq: bool = False, fsq_levels=(8, 8, 8, 5, 5, 5), fsq_stages: int = 4,

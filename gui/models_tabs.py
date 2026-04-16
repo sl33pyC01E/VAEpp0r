@@ -677,9 +677,11 @@ class ConvertTab(tk.Frame):
 
         # -- 3D-specific architecture rows (hidden by default) --
         from gui.common import (MINIVAE3D_PRESETS, MINIVAE3D_PRESET_NAMES,
-                                MINIVAE3D_DEFAULT_PRESET, estimate_latent_dims)
+                                MINIVAE3D_DEFAULT_PRESET, estimate_latent_dims,
+                                estimate_param_count)
         self._3d_presets = MINIVAE3D_PRESETS
         self._estimate_dims = estimate_latent_dims
+        self._estimate_params = estimate_param_count
         self._3d_frame = tk.Frame(top, bg=BG_PANEL)
 
         preset_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
@@ -797,7 +799,8 @@ class ConvertTab(tk.Frame):
             self.fsq3d_var.set(preset["fsq"])
         self._update_dim_info_3d()
         if not getattr(self, "_dim_trace_wired", False):
-            for v in (self.latent3d_var, self.haar3d_var,
+            for v in (self.latent3d_var, self.base_ch_var, self.ch_mult_var,
+                      self.num_res_var, self.haar3d_var,
                       self.t_down3d_var, self.s_down3d_var, self.fsq3d_var):
                 try:
                     v.trace_add("write", lambda *a: self._update_dim_info_3d())
@@ -806,8 +809,18 @@ class ConvertTab(tk.Frame):
             self._dim_trace_wired = True
 
     def _update_dim_info_3d(self):
-        """Recompute 3D latent dim info from current field values."""
+        """Schedule a debounced recompute."""
+        if getattr(self, "_dim_job", None) is not None:
+            try:
+                self.after_cancel(self._dim_job)
+            except Exception:
+                pass
+        self._dim_job = self.after(250, self._do_update_dim_info_3d)
+
+    def _do_update_dim_info_3d(self):
+        self._dim_job = None
         try:
+            ch_mult = tuple(int(x) for x in self.ch_mult_var.get().split(","))
             t_down = tuple(x.strip().lower() in ("true", "1", "yes")
                            for x in self.t_down3d_var.get().split(","))
             s_down = tuple(x.strip().lower() in ("true", "1", "yes")
@@ -815,11 +828,18 @@ class ConvertTab(tk.Frame):
             haar = int(self.haar3d_var.get())
             t_dn = (2 ** sum(t_down)) * (2 ** haar)
             s_dn = (2 ** sum(s_down)) * (2 ** haar)
+            fsq = bool(self.fsq3d_var.get())
+            latent_ch = int(self.latent3d_var.get())
             d = self._estimate_dims(
-                int(self.latent3d_var.get()), s_dn, t_dn,
-                fsq=bool(self.fsq3d_var.get()),
-                H=360, W=640)
-            self.dim_info_var.set(d["label"])
+                latent_ch, s_dn, t_dn, fsq=fsq, H=360, W=640)
+            params = 0
+            if len(t_down) == len(ch_mult) and len(s_down) == len(ch_mult):
+                params = self._estimate_params(
+                    latent_ch, int(self.base_ch_var.get()), ch_mult,
+                    int(self.num_res_var.get()),
+                    t_down, s_down, haar, fsq)
+            p_str = f"Params: {params/1e6:.1f}M  |  " if params else ""
+            self.dim_info_var.set(p_str + d["label"])
         except Exception as e:
             self.dim_info_var.set(f"(dim calc error: {e})")
 
@@ -1522,9 +1542,11 @@ class VideoTrain3DTab(tk.Frame):
 
         # Preset row
         from gui.common import (MINIVAE3D_PRESETS, MINIVAE3D_PRESET_NAMES,
-                                MINIVAE3D_DEFAULT_PRESET, estimate_latent_dims)
+                                MINIVAE3D_DEFAULT_PRESET, estimate_latent_dims,
+                                estimate_param_count)
         self._presets = MINIVAE3D_PRESETS
         self._estimate_dims = estimate_latent_dims
+        self._estimate_params = estimate_param_count
         preset_row = tk.Frame(top, bg=BG_PANEL)
         preset_row.pack(fill="x", pady=(10, 0))
         tk.Label(preset_row, text="Preset:", bg=BG_PANEL, fg=FG_DIM,
@@ -1583,7 +1605,7 @@ class VideoTrain3DTab(tk.Frame):
         # Training config
         row1 = tk.Frame(top, bg=BG_PANEL)
         row1.pack(fill="x", pady=(5, 0))
-        f, self.lr_var = make_float(row1, "LR", "2e-4")
+        f, self.lr_var = make_float(row1, "LR", "1e-5")
         f.pack(side="left", padx=(0, 10))
         f, self.batch_var = make_spin(row1, "Batch", default=1)
         f.pack(side="left", padx=(0, 10))
@@ -1712,7 +1734,8 @@ class VideoTrain3DTab(tk.Frame):
         self._update_dim_info()
         # Wire live updates once
         if not getattr(self, "_dim_trace_wired", False):
-            for v in (self.latent_var, self.haar_levels_var,
+            for v in (self.latent_var, self.base_ch_var, self.ch_mult_var,
+                      self.num_res_var, self.haar_levels_var,
                       self.t_down_var, self.s_down_var,
                       self.fsq_var, self.fsq_stages_var, self.fsq_levels_var):
                 try:
@@ -1722,8 +1745,19 @@ class VideoTrain3DTab(tk.Frame):
             self._dim_trace_wired = True
 
     def _update_dim_info(self):
-        """Recompute the latent dim info label from current field values."""
+        """Schedule a debounced recompute of the latent dim + param label."""
+        # Cancel any pending recompute
+        if getattr(self, "_dim_job", None) is not None:
+            try:
+                self.after_cancel(self._dim_job)
+            except Exception:
+                pass
+        self._dim_job = self.after(250, self._do_update_dim_info)
+
+    def _do_update_dim_info(self):
+        self._dim_job = None
         try:
+            ch_mult = tuple(int(x) for x in self.ch_mult_var.get().split(","))
             t_down = tuple(x.strip().lower() in ("true", "1", "yes")
                            for x in self.t_down_var.get().split(","))
             s_down = tuple(x.strip().lower() in ("true", "1", "yes")
@@ -1734,11 +1768,20 @@ class VideoTrain3DTab(tk.Frame):
             fsq = bool(self.fsq_var.get())
             fsq_stages = int(self.fsq_stages_var.get())
             fsq_levels = tuple(int(x) for x in self.fsq_levels_var.get().split(","))
+            latent_ch = int(self.latent_var.get())
             d = self._estimate_dims(
-                int(self.latent_var.get()), s_dn, t_dn,
+                latent_ch, s_dn, t_dn,
                 fsq=fsq, fsq_levels=fsq_levels, fsq_stages=fsq_stages,
                 H=360, W=640)
-            self.dim_info_var.set(d["label"])
+            # Guard param count in case arch strings don't match n_levels
+            params = 0
+            if len(t_down) == len(ch_mult) and len(s_down) == len(ch_mult):
+                params = self._estimate_params(
+                    latent_ch, int(self.base_ch_var.get()), ch_mult,
+                    int(self.num_res_var.get()),
+                    t_down, s_down, haar, fsq, fsq_levels, fsq_stages)
+            p_str = f"Params: {params/1e6:.1f}M  |  " if params else ""
+            self.dim_info_var.set(p_str + d["label"])
         except Exception as e:
             self.dim_info_var.set(f"(dim calc error: {e})")
 

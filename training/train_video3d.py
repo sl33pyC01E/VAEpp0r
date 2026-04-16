@@ -841,7 +841,7 @@ def main():
     p.add_argument("--fsq-stages", type=int, default=4,
                    help="Number of residual FSQ stages")
     p.add_argument("--batch-size", type=int, default=1)
-    p.add_argument("--lr", default="2e-4")
+    p.add_argument("--lr", default="1e-5")
     p.add_argument("--total-steps", type=int, default=30000)
     p.add_argument("--precision", default="bf16",
                    choices=["fp16", "bf16", "fp32"])
