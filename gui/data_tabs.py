@@ -724,13 +724,64 @@ class VideoGenTab(tk.Frame):
         self.build()
 
     def build(self):
+        # --- HEADER (always visible, holds title + buttons + status) ---
         top = tk.Frame(self, bg=BG_PANEL, padx=10, pady=10)
         top.pack(fill="x", padx=5, pady=5)
 
         tk.Label(top, text="Video Generator (Stage 2)", bg=BG_PANEL, fg=FG,
                  font=FONT_TITLE).pack(anchor="w")
 
-        row1 = tk.Frame(top, bg=BG_PANEL)
+        # Primary action buttons moved ABOVE the big config list so they're
+        # always visible regardless of how many effect rows are added.
+        btn_row = tk.Frame(top, bg=BG_PANEL)
+        btn_row.pack(fill="x", pady=(8, 0))
+        make_btn(btn_row, "Generate 1", self.gen_video, GREEN).pack(
+            side="left", padx=(0, 5))
+        make_btn(btn_row, "Generate 8 Grid", self.gen_grid, ACCENT).pack(
+            side="left", padx=(0, 5))
+        make_btn(btn_row, "Build Banks", self.build_banks, BLUE).pack(
+            side="left", padx=(0, 10))
+        make_btn(btn_row, "Build Pool", self.build_pool, GREEN).pack(
+            side="left", padx=(0, 5))
+        make_btn(btn_row, "Disco Pool", self.disco_pool, "#dd44dd").pack(
+            side="left", padx=(0, 5))
+        make_btn(btn_row, "Save Pool", self.save_pool, BLUE).pack(
+            side="left", padx=(0, 5))
+        make_btn(btn_row, "Load Pool", self.load_pool, BLUE).pack(
+            side="left", padx=(0, 5))
+        make_btn(btn_row, "Empty Pool", self.empty_pool, RED).pack(side="left")
+
+        self.status = tk.Label(top, text="Ready", bg=BG_PANEL, fg=FG_DIM,
+                                font=FONT_SMALL)
+        self.status.pack(fill="x", pady=(6, 0))
+
+        # --- SCROLLABLE CONFIG AREA ---
+        scroll_container = tk.Frame(self, bg=BG)
+        scroll_container.pack(fill="both", expand=True, padx=5, pady=(0, 5))
+        canvas = tk.Canvas(scroll_container, bg=BG_PANEL,
+                           highlightthickness=0)
+        scrollbar = tk.Scrollbar(scroll_container, orient="vertical",
+                                  command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        config = tk.Frame(canvas, bg=BG_PANEL, padx=10, pady=10)
+        canvas_win = canvas.create_window((0, 0), window=config, anchor="nw")
+
+        def _on_inner_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_win, width=event.width)
+        config.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        # Bind wheel only when pointer is inside the canvas
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        row1 = tk.Frame(config, bg=BG_PANEL)
         row1.pack(fill="x", pady=(10, 0))
         f, self.T_var = make_spin(row1, "Frames (T)", default=24, width=6)
         f.pack(side="left", padx=(0, 10))
@@ -740,7 +791,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Motion controls
-        row2 = tk.Frame(top, bg=BG_PANEL)
+        row2 = tk.Frame(config, bg=BG_PANEL)
         row2.pack(fill="x", pady=(5, 0))
         f, self.pan_str = make_slider(row2, "Pan", 0, 1, 0.5)
         f.pack(side="left", padx=(0, 5))
@@ -748,7 +799,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left", padx=(0, 5))
 
         # Checkboxes
-        row2b = tk.Frame(top, bg=BG_PANEL)
+        row2b = tk.Frame(config, bg=BG_PANEL)
         row2b.pack(fill="x", pady=(2, 0))
         self.disco_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2b, text="Disco BG",
@@ -784,7 +835,7 @@ class VideoGenTab(tk.Frame):
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
 
         # Viewport + fluid sliders
-        row2c = tk.Frame(top, bg=BG_PANEL)
+        row2c = tk.Frame(config, bg=BG_PANEL)
         row2c.pack(fill="x", pady=(2, 0))
         f, self.vp_pan_str = make_slider(row2c, "VP Pan", 0, 1, 0.3)
         f.pack(side="left", padx=(0, 5))
@@ -796,7 +847,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Ripple (liquid-surface) sliders
-        row2d = tk.Frame(top, bg=BG_PANEL)
+        row2d = tk.Frame(config, bg=BG_PANEL)
         row2d.pack(fill="x", pady=(2, 0))
         f, self.ripple_warp = make_slider(row2d, "Ripple warp", 0, 20, 8.0)
         f.pack(side="left", padx=(0, 5))
@@ -804,7 +855,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Effects row (Phase 2): shake, kaleidoscope, fast transforms
-        row2e = tk.Frame(top, bg=BG_PANEL)
+        row2e = tk.Frame(config, bg=BG_PANEL)
         row2e.pack(fill="x", pady=(2, 0))
         self.shake_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2e, text="Shake",
@@ -823,7 +874,7 @@ class VideoGenTab(tk.Frame):
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
 
         # Effects sliders row
-        row2f = tk.Frame(top, bg=BG_PANEL)
+        row2f = tk.Frame(config, bg=BG_PANEL)
         row2f.pack(fill="x", pady=(2, 0))
         f, self.shake_amp = make_slider(row2f, "Shake amp", 0, 0.15, 0.02)
         f.pack(side="left", padx=(0, 5))
@@ -835,7 +886,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Flash / strobe / palette row (Phase 3)
-        row2g = tk.Frame(top, bg=BG_PANEL)
+        row2g = tk.Frame(config, bg=BG_PANEL)
         row2g.pack(fill="x", pady=(2, 0))
         self.flash_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2g, text="Flash", variable=self.flash_var,
@@ -845,7 +896,7 @@ class VideoGenTab(tk.Frame):
         tk.Checkbutton(row2g, text="Palette cycle", variable=self.palette_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        row2h = tk.Frame(top, bg=BG_PANEL)
+        row2h = tk.Frame(config, bg=BG_PANEL)
         row2h.pack(fill="x", pady=(2, 0))
         f, self.flash_n = make_slider(row2h, "Flash count", 0, 10, 2)
         f.pack(side="left", padx=(0, 5))
@@ -855,7 +906,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Text overlay (Phase 4)
-        row2i = tk.Frame(top, bg=BG_PANEL)
+        row2i = tk.Frame(config, bg=BG_PANEL)
         row2i.pack(fill="x", pady=(2, 0))
         self.text_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2i, text="Text", variable=self.text_var,
@@ -869,7 +920,7 @@ class VideoGenTab(tk.Frame):
                       "mixed", "latin", "cyrillic", "greek",
                       "hebrew", "arabic", "digits").pack(side="left", padx=(0, 6))
 
-        row2j = tk.Frame(top, bg=BG_PANEL)
+        row2j = tk.Frame(config, bg=BG_PANEL)
         row2j.pack(fill="x", pady=(2, 0))
         f, self.text_size = make_slider(row2j, "Font size", 8, 64, 24)
         f.pack(side="left", padx=(0, 5))
@@ -879,7 +930,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Signage (Phase 5)
-        row2k = tk.Frame(top, bg=BG_PANEL)
+        row2k = tk.Frame(config, bg=BG_PANEL)
         row2k.pack(fill="x", pady=(2, 0))
         self.signage_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2k, text="Signage", variable=self.signage_var,
@@ -894,7 +945,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Particles (Phase 6)
-        row2l = tk.Frame(top, bg=BG_PANEL)
+        row2l = tk.Frame(config, bg=BG_PANEL)
         row2l.pack(fill="x", pady=(2, 0))
         self.particles_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2l, text="Particles", variable=self.particles_var,
@@ -908,7 +959,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Raymarch (Phase 7)
-        row2m = tk.Frame(top, bg=BG_PANEL)
+        row2m = tk.Frame(config, bg=BG_PANEL)
         row2m.pack(fill="x", pady=(2, 0))
         self.raymarch_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2m, text="3D (SDF)", variable=self.raymarch_var,
@@ -924,7 +975,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Arcade (Phase 8)
-        row2n = tk.Frame(top, bg=BG_PANEL)
+        row2n = tk.Frame(config, bg=BG_PANEL)
         row2n.pack(fill="x", pady=(2, 0))
         self.arcade_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2n, text="Arcade", variable=self.arcade_var,
@@ -936,7 +987,7 @@ class VideoGenTab(tk.Frame):
                       "snake", "tetris", "asteroids").pack(side="left", padx=(0, 6))
 
         # Glitch / chromatic / scanlines / grain (Phase 9)
-        row2o = tk.Frame(top, bg=BG_PANEL)
+        row2o = tk.Frame(config, bg=BG_PANEL)
         row2o.pack(fill="x", pady=(2, 0))
         self.glitch_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2o, text="Glitch", variable=self.glitch_var,
@@ -950,7 +1001,7 @@ class VideoGenTab(tk.Frame):
         tk.Checkbutton(row2o, text="Scanlines", variable=self.scanlines_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        row2p = tk.Frame(top, bg=BG_PANEL)
+        row2p = tk.Frame(config, bg=BG_PANEL)
         row2p.pack(fill="x", pady=(2, 0))
         f, self.glitch_n = make_slider(row2p, "Glitch bursts", 0, 10, 2)
         f.pack(side="left", padx=(0, 4))
@@ -960,7 +1011,7 @@ class VideoGenTab(tk.Frame):
         f.pack(side="left")
 
         # Extras (Phase 10): fire / vortex / starfield / eq
-        row2q = tk.Frame(top, bg=BG_PANEL)
+        row2q = tk.Frame(config, bg=BG_PANEL)
         row2q.pack(fill="x", pady=(2, 0))
         self.fire_var = tk.BooleanVar(value=False)
         tk.Checkbutton(row2q, text="Fire", variable=self.fire_var,
@@ -979,35 +1030,7 @@ class VideoGenTab(tk.Frame):
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
 
-        # Buttons
-        row3 = tk.Frame(top, bg=BG_PANEL)
-        row3.pack(fill="x", pady=(5, 0))
-        make_btn(row3, "Generate 1", self.gen_video, GREEN).pack(
-            side="left", padx=(0, 5))
-        make_btn(row3, "Generate 8 Grid", self.gen_grid, ACCENT).pack(
-            side="left", padx=(0, 5))
-        make_btn(row3, "Build Banks", self.build_banks, BLUE).pack(
-            side="left", padx=(0, 5))
-
-        row3b = tk.Frame(top, bg=BG_PANEL)
-        row3b.pack(fill="x", pady=(2, 0))
-        make_btn(row3b, "Build Pool", self.build_pool, GREEN).pack(
-            side="left", padx=(0, 5))
-        make_btn(row3b, "Save Pool", self.save_pool, BLUE).pack(
-            side="left", padx=(0, 5))
-        make_btn(row3b, "Load Pool", self.load_pool, BLUE).pack(
-            side="left", padx=(0, 5))
-
-        row3c = tk.Frame(top, bg=BG_PANEL)
-        row3c.pack(fill="x", pady=(2, 0))
-        make_btn(row3c, "Empty Pool", self.empty_pool, RED).pack(
-            side="left", padx=(0, 5))
-        make_btn(row3c, "Disco Pool", self.disco_pool, "#dd44dd").pack(
-            side="left")
-
-        self.status = tk.Label(top, text="Ready", bg=BG_PANEL, fg=FG_DIM,
-                                font=FONT_SMALL)
-        self.status.pack(fill="x", pady=(5, 0))
+        # (Buttons + status are above the scrollable area — see top of build().)
 
         self.log = make_log(self)
         self.log.config(height=8)
