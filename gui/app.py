@@ -20,6 +20,8 @@ from gui.models_tabs import (
 from gui.compress_tabs import (
     FlattenTab, FlattenInferenceTab, FlattenVideoTab, FlattenVideoInferenceTab,
 )
+from gui.tokenizer_tabs import TokenizerTrainTab, TokenizerInfTab
+from gui.elastictok_tabs import ElasticTokTrainTab, ElasticTokInfTab
 
 
 class App(tk.Tk):
@@ -60,6 +62,16 @@ class App(tk.Tk):
         models_nb.add(VideoTrain3DTab(models_nb), text="Video Train 3D")
         models_nb.add(VideoInferenceTab(models_nb), text="Video Inf")
         nb.add(models_frame, text="Models")
+
+        # -- Tokenizer --
+        tok_frame = tk.Frame(nb, bg=BG)
+        tok_nb = ttk.Notebook(tok_frame)
+        tok_nb.pack(fill="both", expand=True)
+        tok_nb.add(TokenizerTrainTab(tok_nb), text="Tokenizer Train")
+        tok_nb.add(TokenizerInfTab(tok_nb), text="Tokenizer Inf")
+        tok_nb.add(ElasticTokTrainTab(tok_nb), text="ElasticTok Train")
+        tok_nb.add(ElasticTokInfTab(tok_nb), text="ElasticTok Inf")
+        nb.add(tok_frame, text="Tokenizer")
 
         # -- Compress --
         compress_frame = tk.Frame(nb, bg=BG)

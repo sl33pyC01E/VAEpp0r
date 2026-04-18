@@ -230,6 +230,58 @@ def make_slider(parent, label, from_=0.0, to=1.0, default=0.5, resolution=0.01):
     return frame, var
 
 
+# -- Overfit-mode row ----------------------------------------------------------
+# One-clip overfit toggle for training tabs. The training script is expected
+# to support `--overfit-video PATH --overfit-frame-skip N` args which bypass
+# the generator and train on a single cached clip (or single frame for
+# static tabs). Video tabs use T frames starting at frame_skip; static tabs
+# use just frame N.
+def make_overfit_row(parent):
+    """Return (frame, toggle_var, path_var, skip_var).
+
+    Caller packs `frame` wherever it wants. In subprocess launcher,
+    do: `if toggle_var.get() and path_var.get().strip(): cmd +=
+    ["--overfit-video", path_var.get().strip(), "--overfit-frame-skip",
+    str(skip_var.get())]`.
+    """
+    from tkinter import filedialog
+    frame = tk.Frame(parent, bg=BG_PANEL)
+    toggle_var = tk.BooleanVar(value=False)
+    path_var = tk.StringVar(value="")
+    skip_var = tk.IntVar(value=0)
+
+    tk.Checkbutton(
+        frame, text="Overfit on video:",
+        variable=toggle_var, bg=BG_PANEL, fg=FG,
+        selectcolor=BG_INPUT, font=FONT_SMALL,
+        activebackground=BG_PANEL, activeforeground=FG,
+    ).pack(side="left", padx=(0, 4))
+
+    tk.Entry(
+        frame, textvariable=path_var,
+        bg=BG_INPUT, fg=FG, insertbackground=FG,
+        font=FONT_SMALL,
+    ).pack(side="left", fill="x", expand=True, padx=(0, 4))
+
+    def _pick():
+        p = filedialog.askopenfilename(
+            title="Select overfit video",
+            filetypes=[("Video", "*.mp4 *.mkv *.mov *.webm *.avi"),
+                       ("All", "*.*")])
+        if p:
+            path_var.set(p)
+
+    make_btn(frame, "Browse", _pick, BLUE, 8).pack(side="left", padx=(0, 4))
+    make_btn(frame, "Clear", lambda: path_var.set(""), RED, 6).pack(
+        side="left", padx=(0, 8))
+    tk.Label(frame, text="Skip frames", bg=BG_PANEL, fg=FG_DIM,
+             font=FONT_SMALL).pack(side="left", padx=(0, 4))
+    tk.Spinbox(frame, from_=0, to=10**7, textvariable=skip_var,
+               width=6, bg=BG_INPUT, fg=FG, insertbackground=FG,
+               font=FONT_SMALL).pack(side="left")
+    return frame, toggle_var, path_var, skip_var
+
+
 # -- Inference saving helper ---------------------------------------------------
 def save_inference_output(images, logdir, prefix="inference", label="output"):
     """Save inference images to logdir/inference/ with timestamp."""
@@ -318,8 +370,15 @@ def haar_up_n(x, n):
 CHUNK_SIZE = 24
 
 @torch.no_grad()
-def chunked_vae_inference(model, x, chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloat16):
+def chunked_vae_inference(model, x, chunk_size=None, amp_dtype=torch.bfloat16):
     """Run VAE encode+decode in overlapping chunks with cross-fade blending.
+
+    chunk_size:
+        - None (default): use `model.train_T` if it was set at load time
+          (the T the checkpoint was trained at), else fall back to
+          `max(2 * model.t_downscale, 8)`, aligned to a multiple of
+          `t_downscale`.
+        - int: explicit override, aligned to t_downscale.
 
     Uses large overlap (half the output length) and linearly blends in the
     overlap region to eliminate flicker at chunk boundaries.
@@ -330,6 +389,13 @@ def chunked_vae_inference(model, x, chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloa
     """
     T = x.shape[1]
     trim = getattr(model, 'frames_to_trim', 0)
+    t_ds = getattr(model, 't_downscale', 1) or 1
+
+    # Resolve chunk_size from the model's training T when not given
+    if chunk_size is None:
+        chunk_size = getattr(model, 'train_T', 0) or max(8, 2 * t_ds)
+    # Align to a multiple of t_downscale so chunks cover full latent slots
+    chunk_size = max(t_ds, (int(chunk_size) // t_ds) * t_ds)
 
     if T <= chunk_size:
         with torch.amp.autocast("cuda", dtype=amp_dtype):
@@ -410,14 +476,22 @@ def chunked_vae_inference(model, x, chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloa
 
 
 @torch.no_grad()
-def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
+def chunked_flatten_inference(vae, bottleneck, x, chunk_size=None,
                                amp_dtype=torch.bfloat16,
                                encode_fn=None, decode_fn=None):
     """Run VAE encode -> flatten/deflatten -> VAE decode in chunks with cross-fade.
-    encode_fn/decode_fn override vae paths when provided (for FSQ)."""
+    encode_fn/decode_fn override vae paths when provided (for FSQ).
+
+    chunk_size defaults to the VAE's `train_T` (its training-time T), else
+    `max(8, 2 * vae.t_downscale)`, aligned to a multiple of t_downscale.
+    """
     _encode = encode_fn or (lambda c: vae.encode_video(c))
     _decode = decode_fn or (lambda z: vae.decode_video(z))
     T = x.shape[1]
+    t_ds = getattr(vae, 't_downscale', 1) or 1
+    if chunk_size is None:
+        chunk_size = getattr(vae, 'train_T', 0) or max(8, 2 * t_ds)
+    chunk_size = max(t_ds, (int(chunk_size) // t_ds) * t_ds)
     if T <= chunk_size:
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             lat = _encode(x)
@@ -495,13 +569,21 @@ def chunked_flatten_inference(vae, bottleneck, x, chunk_size=CHUNK_SIZE,
 
 @torch.no_grad()
 def chunked_fsq_inference(vae, fsq_layer, pre_quant, post_quant, x,
-                           chunk_size=CHUNK_SIZE, amp_dtype=torch.bfloat16):
+                           chunk_size=None, amp_dtype=torch.bfloat16):
     """Run VAE encode -> FSQ -> VAE decode in chunks with cross-fade.
+
+    chunk_size defaults to the VAE's `train_T`, else `max(8, 2*t_downscale)`,
+    aligned to a multiple of t_downscale. Half-chunk overlap preserved
+    by the blend logic below.
 
     Returns:
         recon_fsq: FSQ reconstruction (aligned to input[trim:])
     """
     T = x.shape[1]
+    t_ds = getattr(vae, 't_downscale', 1) or 1
+    if chunk_size is None:
+        chunk_size = getattr(vae, 'train_T', 0) or max(8, 2 * t_ds)
+    chunk_size = max(t_ds, (int(chunk_size) // t_ds) * t_ds)
     if T <= chunk_size:
         with torch.amp.autocast("cuda", dtype=amp_dtype):
             lat = vae.encode_video(x)
@@ -662,18 +744,111 @@ MINIVAE3D_PRESET_NAMES = list(MINIVAE3D_PRESETS.keys())
 MINIVAE3D_DEFAULT_PRESET = "Small-Haar (~10M, 8s 4t, Haar)"
 
 
+# -- ElasticVideoTokenizer presets ---------------------------------------------
+# Mirrors MINIVAE3D_PRESETS. Keys match the argparse flags of
+# train_tokenizer.py. params_hint is a rough display-only estimate; actual
+# count is computed by instantiating on meta device.
+TOKENIZER_PRESETS = {
+    "Custom": None,
+
+    "Mini (~5M, N_q=64, d8)": {
+        "n_queries": 64, "min_keep": 16,
+        "dim": 192, "depth": 4, "heads": 4, "d_bottleneck": 8,
+        "params_hint": 5_000_000,
+    },
+    "Small (~12M, N_q=128, d8)": {
+        "n_queries": 128, "min_keep": 32,
+        "dim": 256, "depth": 5, "heads": 4, "d_bottleneck": 8,
+        "params_hint": 12_000_000,
+    },
+    "Medium (~25M, N_q=128, d8)": {
+        "n_queries": 128, "min_keep": 32,
+        "dim": 384, "depth": 6, "heads": 6, "d_bottleneck": 8,
+        "params_hint": 25_000_000,
+    },
+    "Large (~60M, N_q=256, d12)": {
+        "n_queries": 256, "min_keep": 64,
+        "dim": 512, "depth": 8, "heads": 8, "d_bottleneck": 12,
+        "params_hint": 60_000_000,
+    },
+}
+
+TOKENIZER_PRESET_NAMES = list(TOKENIZER_PRESETS.keys())
+TOKENIZER_DEFAULT_PRESET = "Medium (~25M, N_q=128, d8)"
+
+
+def estimate_tokenizer_dims(n_queries: int, T: int, t_downscale: int,
+                            d_bottleneck: int, H: int = 360, W: int = 640,
+                            s_downscale: int = 16):
+    """Compute tokens-per-clip for the tokenizer at the given VAE t_downscale.
+
+    The tokenizer emits N_q query tokens per latent-temporal slot. VAE slot
+    count for T frames is ceil(T / t_downscale) (Cosmos convention). Each
+    token is a d_bottleneck-dim float vector in v1 (continuous bottleneck);
+    when FSQ replaces the bottleneck later, bits/token becomes log2(codebook).
+    """
+    t_lat = max(1, -(-int(T) // max(int(t_downscale), 1)))
+    total_tokens = int(n_queries) * t_lat
+    # v1 bottleneck is continuous bf16 — d_bottleneck floats per token
+    vals_per_token = int(d_bottleneck)
+    total_vals = total_tokens * vals_per_token
+    bits = total_vals * 16
+    raw_bits = int(T) * H * W * 3 * 8
+    ratio = raw_bits / bits if bits else 0.0
+    label = (f"Tokenizer(T={int(T)}->T'={t_lat}): "
+             f"{int(n_queries)}x{t_lat} = {total_tokens:,} tokens "
+             f"({total_vals:,} floats, {bits/8/1024:.1f} KB)  |  "
+             f"Raw {int(T)}f: {raw_bits/8/1024/1024:.1f} MB  |  "
+             f"Compression: {ratio:.0f}x")
+    return {
+        "t_lat": t_lat,
+        "total_tokens": total_tokens,
+        "total_vals": total_vals,
+        "bits": bits,
+        "ratio": ratio,
+        "label": label,
+    }
+
+
 _PARAM_CACHE = {}
 
 
-def estimate_param_count(latent_ch, base_ch, ch_mult, num_res_blocks,
-                         temporal_down, spatial_down, haar_levels, fsq,
-                         fsq_levels=(8, 8, 8, 5, 5, 5), fsq_stages=4):
+def estimate_param_count(latent_ch, base_ch=None, ch_mult=None,
+                         num_res_blocks=2,
+                         temporal_down=None, spatial_down=None,
+                         haar_levels=0, fsq=False,
+                         fsq_levels=(8, 8, 8, 5, 5, 5), fsq_stages=4,
+                         enc_channels=None, dec_channels=None,
+                         use_attention=True, use_groupnorm=True,
+                         residual_shortcut=False,
+                         attn_heads=8, gn_groups=1):
     """Instantiate a MiniVAE3D on meta device and return exact param count.
-    Results cached by config tuple."""
+    Results cached by config tuple.
+
+    Two ways to specify the channel schedule:
+      - `enc_channels` (shallow->deep) + `dec_channels` (deep->shallow), matching
+        VideoTrainTab's Enc ch / Dec ch convention. Preferred.
+      - Legacy `base_ch` + `ch_mult` (symmetric). `enc = base*mult`,
+        `dec = reversed(enc)`.
+    """
     import torch
-    key = (latent_ch, base_ch, tuple(ch_mult), num_res_blocks,
-           tuple(temporal_down), tuple(spatial_down),
-           haar_levels, bool(fsq), tuple(fsq_levels), fsq_stages)
+    # Resolve explicit enc/dec
+    if enc_channels is None or dec_channels is None:
+        if base_ch is None or ch_mult is None:
+            raise ValueError(
+                "Provide either (enc_channels, dec_channels) or "
+                "(base_ch, ch_mult) to estimate_param_count.")
+        enc_channels = tuple(base_ch * int(m) for m in ch_mult)
+        dec_channels = tuple(reversed(enc_channels))
+    else:
+        enc_channels = tuple(int(x) for x in enc_channels)
+        dec_channels = tuple(int(x) for x in dec_channels)
+
+    key = (latent_ch, enc_channels, dec_channels, num_res_blocks,
+           tuple(temporal_down or ()), tuple(spatial_down or ()),
+           haar_levels, bool(fsq), tuple(fsq_levels), fsq_stages,
+           bool(use_attention), bool(use_groupnorm),
+           bool(residual_shortcut), int(attn_heads), int(gn_groups))
     if key in _PARAM_CACHE:
         return _PARAM_CACHE[key]
     try:
@@ -681,12 +856,16 @@ def estimate_param_count(latent_ch, base_ch, ch_mult, num_res_blocks,
         with torch.device("meta"):
             m = MiniVAE3D(
                 latent_channels=latent_ch, image_channels=3, output_channels=3,
-                base_channels=base_ch, channel_mult=tuple(ch_mult),
+                enc_channels=enc_channels, dec_channels=dec_channels,
                 num_res_blocks=num_res_blocks,
                 temporal_downsample=tuple(temporal_down),
                 spatial_downsample=tuple(spatial_down),
                 haar_levels=haar_levels, fsq=fsq,
                 fsq_levels=tuple(fsq_levels), fsq_stages=fsq_stages,
+                use_attention=bool(use_attention),
+                use_groupnorm=bool(use_groupnorm),
+                residual_shortcut=bool(residual_shortcut),
+                attn_heads=int(attn_heads), gn_groups=int(gn_groups),
             )
         p = sum(x.numel() for x in m.parameters())
     except Exception:
@@ -699,20 +878,30 @@ def estimate_latent_dims(
     latent_ch: int, s_downscale: int, t_downscale: int,
     fsq: bool = False, fsq_levels=(8, 8, 8, 5, 5, 5), fsq_stages: int = 4,
     H: int = 360, W: int = 640,
+    T: int | None = None,
 ):
-    """Compute latent shape + per-slot dim count + compression ratio at HxW.
+    """Compute latent shape + per-slot AND per-clip dim count + compression.
 
-    Returns dict with:
-        h_lat, w_lat          - spatial latent grid
-        per_slot_vals         - values per temporal slot (continuous) or
-                                tokens per slot (discrete)
-        per_slot_bits         - storage bits per temporal slot (bf16/fp16
-                                for continuous, log2(codebook) per token
-                                for discrete)
-        raw_frame_bits        - raw 8-bit RGB bits per input frame
-        ratio                 - raw_bits / per_slot_bits over `t_downscale`
-                                input frames
-        label                 - compact one-line summary for UI display
+    Per-slot math:
+        h_lat, w_lat  - ceil(H/s_downscale), ceil(W/s_downscale)
+        n_channels    - fsq_stages if fsq else latent_ch
+        per_slot_vals = n_channels * h_lat * w_lat
+        per_slot_bits = per_slot_vals * (log2 codebook if fsq else 16)
+
+    Per-clip math (when T is provided):
+        t_lat         - how many latent temporal slots for T input frames.
+                        MiniVAE3D pads T up to a multiple of t_downscale
+                        (see encode_video()'s `(-T) % t_downscale`), so
+                        t_lat = ceil(T / t_downscale).
+        clip_vals     = per_slot_vals * t_lat
+        clip_bits     = per_slot_bits * t_lat
+        raw_clip_bits = T * H * W * 3 * 8  (the real input, not padded)
+
+    Raw bit baseline for compression:
+        with T: use the actual T input frames (what the user sees)
+        without T: use t_downscale frames (one-slot equivalent, legacy)
+
+    Returns dict with all of the above plus a compact `label` string.
     """
     import math
     # Pad to nearest multiple of s_downscale (ceil)
@@ -734,24 +923,46 @@ def estimate_latent_dims(
     per_slot_vals = n_channels * h_lat * w_lat
     per_slot_bits = per_slot_vals * bits_per_val
 
-    # Raw: t_downscale input frames -> 1 latent slot
-    raw_t = max(t_downscale, 1)
-    raw_bits = raw_t * H * W * 3 * 8
-    ratio = raw_bits / per_slot_bits if per_slot_bits > 0 else 0.0
+    if T is not None and T > 0:
+        # encode_video pads: t_lat = ceil(T / t_downscale)
+        t_lat = -(-int(T) // max(t_downscale, 1))
+        clip_vals = per_slot_vals * t_lat
+        clip_bits = per_slot_bits * t_lat
+        raw_bits = int(T) * H * W * 3 * 8
+        ratio = raw_bits / clip_bits if clip_bits > 0 else 0.0
 
-    # Compact label
-    if fsq:
-        shape_str = f"{n_channels}x{h_lat}x{w_lat}"
+        shape_str = f"{n_channels}x{t_lat}x{h_lat}x{w_lat}"
+        kb = clip_bits / 8 / 1024
+        raw_kb = raw_bits / 8 / 1024
+        if raw_kb >= 1024:
+            raw_str = f"{raw_kb/1024:.1f} MB"
+        else:
+            raw_str = f"{raw_kb:.0f} KB"
+        label = (f"Latent(T={int(T)}->T'={t_lat}): "
+                 f"{shape_str} = {clip_vals:,} {kind} ({kb:.1f} KB)  |  "
+                 f"Raw {int(T)}f: {raw_str}  |  "
+                 f"Compression: {ratio:.0f}x")
     else:
+        # Legacy per-slot label (one latent temporal slot = t_downscale input frames)
+        t_lat = None
+        clip_vals = None
+        clip_bits = None
+        raw_t = max(t_downscale, 1)
+        raw_bits = raw_t * H * W * 3 * 8
+        ratio = raw_bits / per_slot_bits if per_slot_bits > 0 else 0.0
         shape_str = f"{n_channels}x{h_lat}x{w_lat}"
-    label = (f"Latent/slot: {shape_str} = {per_slot_vals:,} {kind}  "
-             f"({per_slot_bits/8/1024:.1f} KB)  "
-             f"Raw {raw_t}f: {raw_bits/8/1024:.1f} KB  "
-             f"Compression: {ratio:.0f}x")
+        label = (f"Latent/slot: {shape_str} = {per_slot_vals:,} {kind}  "
+                 f"({per_slot_bits/8/1024:.1f} KB)  |  "
+                 f"Raw {raw_t}f: {raw_bits/8/1024:.1f} KB  |  "
+                 f"Compression: {ratio:.0f}x")
+
     return {
         "h_lat": h_lat, "w_lat": w_lat,
+        "t_lat": t_lat,
         "per_slot_vals": per_slot_vals,
         "per_slot_bits": per_slot_bits,
+        "clip_vals": clip_vals,
+        "clip_bits": clip_bits,
         "raw_frame_bits": H * W * 3 * 8,
         "ratio": ratio,
         "label": label,

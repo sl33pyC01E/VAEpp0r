@@ -254,10 +254,15 @@ class ArcadeMixin:
                     col = palette[(c + r) % len(palette)]
                     self._draw_rect(canvas, origin_x + c * cell, origin_y + r * cell,
                                    cell - 2, cell - 2, col)
-        # Falling piece (uses a simple L-tetromino)
-        if ti < rows * 3:
-            piece_r = (ti // 3) % (rows - stack_height - 2)
-            piece_c = (ti * 7 + ap["seed"]) % (cols - 2)
+        # Falling piece (uses a simple L-tetromino). Only draw when there's
+        # actually room above the stack (need 3 rows of clearance for the
+        # tetromino height). Without this guard, stack_height >= rows-2
+        # makes the modulo divide by zero / negative.
+        fall_range = rows - stack_height - 2
+        col_range = cols - 2
+        if ti < rows * 3 and fall_range > 0 and col_range > 0:
+            piece_r = (ti // 3) % fall_range
+            piece_c = (ti * 7 + ap["seed"]) % col_range
             col = palette[ap["seed"] % len(palette)]
             for dr, dc in [(0, 0), (1, 0), (2, 0), (2, 1)]:
                 self._draw_rect(canvas, origin_x + (piece_c + dc) * cell,

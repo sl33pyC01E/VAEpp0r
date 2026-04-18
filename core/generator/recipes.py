@@ -187,38 +187,91 @@ class RecipesMixin:
                 T=T, n_bars=int(seq_kwargs.get("eq_n_bars", 24)))
         return recipe
 
-    def build_motion_pool(self, n_clips=200, T=8, **seq_kwargs):
+    # Per-effect drop probabilities for random_mix. Matches the GUI's
+    # drop weighting in gui/data_tabs.py (loud effects drop more, subtle
+    # post-FX drop less). Effects not listed here are never rolled.
+    _RANDOM_MIX_DROPS = {
+        "use_shake":         0.30,
+        "use_chromatic":     0.30,
+        "use_scanlines":     0.35,
+        "use_palette_cycle": 0.40,
+        "fast_transform":    0.40,
+        "use_fluid":         0.50,
+        "use_ripple":        0.50,
+        "use_kaleido":       0.50,
+        "use_flash":         0.55,
+        "use_glitch":        0.55,
+        "use_particles":     0.55,
+        "use_raymarch":      0.60,
+        "sphere_dip":        0.70,
+        "use_text":          0.70,
+        "use_signage":       0.75,
+        "use_fire":          0.80,
+        "use_vortex":        0.80,
+        "use_starfield":     0.80,
+        "use_arcade":        0.80,
+        "use_eq":            0.88,
+    }
+
+    def _maybe_random_mix(self, seq_kwargs, random_mix=True):
+        """If random_mix, drop each enabled effect flag at its weighted rate
+        so each recipe has a different effect stack and the pool has
+        variety instead of 'every effect, every clip'."""
+        if not random_mix:
+            return seq_kwargs
+        import random as _rnd
+        kw = dict(seq_kwargs)
+        for k, p in self._RANDOM_MIX_DROPS.items():
+            if kw.get(k) and _rnd.random() < p:
+                kw[k] = False
+        return kw
+
+    def build_motion_pool(self, n_clips=200, T=8, random_mix=True,
+                          **seq_kwargs):
         """Generate motion recipes (not pixels). Lightweight, ~1KB each.
 
         Args:
             n_clips: number of recipes
             T: frames per clip
-            **seq_kwargs: motion settings
+            random_mix: if True (default), each recipe independently rolls
+                its effect flags via _maybe_random_mix so the pool has
+                per-recipe variety instead of every recipe having every
+                enabled effect.
+            **seq_kwargs: motion settings — effect flags (use_ripple,
+                use_shake, etc.) control which effects are *eligible*;
+                random_mix decides per-recipe which actually fire.
         """
-        print(f"Building motion recipe pool ({n_clips} recipes, T={T})...",
-              flush=True)
+        print(f"Building motion recipe pool ({n_clips} recipes, T={T}, "
+              f"random_mix={random_mix})...", flush=True)
         recipes = []
         for i in range(n_clips):
-            recipes.append(self._generate_recipe(T=T, **seq_kwargs))
+            kw_i = self._maybe_random_mix(seq_kwargs, random_mix=random_mix)
+            recipes.append(self._generate_recipe(T=T, **kw_i))
             if (i + 1) % 100 == 0 or i == n_clips - 1:
                 print(f"  [{i+1}/{n_clips}]", flush=True)
         self._recipe_pool = recipes
         self._motion_pool_T = T
+        # Remember raw kwargs + random_mix so _refresh_motion_pool keeps
+        # the same distribution when swapping recipes.
         self._motion_pool_kwargs = seq_kwargs
+        self._motion_pool_random_mix = random_mix
         self._motion_pool_call_count = 0
         print(f"Recipe pool done: {n_clips} recipes", flush=True)
 
     def _refresh_motion_pool(self, swap_frac=0.2, **seq_kwargs):
-        """Swap a fraction of recipes with fresh ones."""
+        """Swap a fraction of recipes with fresh ones.
+        Honors _motion_pool_random_mix so refreshed recipes have the same
+        per-recipe variety as the initial pool."""
         if not hasattr(self, '_recipe_pool') or not self._recipe_pool:
             return
         N = len(self._recipe_pool)
         T = self._motion_pool_T
+        rmix = getattr(self, "_motion_pool_random_mix", True)
         n_swap = max(1, int(N * swap_frac))
         for _ in range(n_swap):
             idx = torch.randint(0, N, (1,)).item()
-            self._recipe_pool[idx] = self._generate_recipe(
-                T=T, **seq_kwargs)
+            kw_i = self._maybe_random_mix(seq_kwargs, random_mix=rmix)
+            self._recipe_pool[idx] = self._generate_recipe(T=T, **kw_i)
 
     def _render_recipe(self, recipe):
         """Render a single recipe into a (T, 3, H, W) clip on GPU.
@@ -233,10 +286,15 @@ class RecipesMixin:
 
         bg = torch.tensor(recipe["bg_color"], device=dev).view(1, 3, 1, 1)
 
-        # Disco background (consistent across all frames in clip)
+        # Disco background (consistent across all frames in clip).
+        # When passthrough fires, the per-frame render loop below skips
+        # the recipe's layer/stamp stack so Q0/Q4-Q7 disco content
+        # survives instead of being painted over.
         disco_bg = None
+        disco_passthrough = False
         if self.disco_quadrant:
             disco_bg = self._generate_disco(1)  # (1, 3, H, W)
+            disco_passthrough = torch.rand(1).item() < 0.5
 
         layer_idx = recipe["layer_idx"]
         n_layers = len(layer_idx)

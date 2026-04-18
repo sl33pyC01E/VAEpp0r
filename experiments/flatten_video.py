@@ -35,12 +35,69 @@ from core.generator import VAEpp0rGenerator
 from experiments.flatten import FlattenDeflatten
 
 
+# -- Haar helpers (2D, per-frame on video tensors) ----------------------------
+# Copy of the convention used by training/train_video.py. Needed here
+# because the frozen VAE checkpoint expects post-Haar input (e.g. 48 ch
+# for haar=4x) even though its config reports image_channels=3 (pre-Haar).
+def _haar_down_2d(x):
+    """(B, C, H, W) -> (B, 4C, H/2, W/2). Orthonormal 2D Haar wavelet."""
+    a = x[:, :, 0::2, 0::2]
+    b = x[:, :, 0::2, 1::2]
+    c = x[:, :, 1::2, 0::2]
+    d = x[:, :, 1::2, 1::2]
+    ll = (a + b + c + d) * 0.5
+    lh = (a - b + c - d) * 0.5
+    hl = (a + b - c - d) * 0.5
+    hh = (a - b - c + d) * 0.5
+    return torch.cat([ll, lh, hl, hh], dim=1)
+
+
+def _haar_up_2d(x):
+    """(B, 4C, H, W) -> (B, C, 2H, 2W). Inverse of _haar_down_2d."""
+    C = x.shape[1] // 4
+    ll, lh, hl, hh = x[:, 0*C:1*C], x[:, 1*C:2*C], x[:, 2*C:3*C], x[:, 3*C:4*C]
+    a = (ll + lh + hl + hh) * 0.5
+    b = (ll - lh + hl - hh) * 0.5
+    c = (ll + lh - hl - hh) * 0.5
+    d = (ll - lh - hl + hh) * 0.5
+    B, Ch, H, W = a.shape
+    out = torch.zeros(B, Ch, H * 2, W * 2, device=x.device, dtype=x.dtype)
+    out[:, :, 0::2, 0::2] = a
+    out[:, :, 0::2, 1::2] = b
+    out[:, :, 1::2, 0::2] = c
+    out[:, :, 1::2, 1::2] = d
+    return out
+
+
+def _haar_down_video(x, n):
+    """(B, T, C, H, W) -> (B, T, C*4^n, H/2^n, W/2^n). Per-frame."""
+    if n <= 0:
+        return x
+    B, T, C, H, W = x.shape
+    y = x.reshape(B * T, C, H, W)
+    for _ in range(n):
+        y = _haar_down_2d(y)
+    return y.reshape(B, T, C * (4 ** n), H // (2 ** n), W // (2 ** n))
+
+
+def _haar_up_video(x, n):
+    """Inverse of _haar_down_video."""
+    if n <= 0:
+        return x
+    B, T, C, H, W = x.shape
+    y = x.reshape(B * T, C, H, W)
+    for _ in range(n):
+        y = _haar_up_2d(y)
+    new_C = C // (4 ** n)
+    return y.reshape(B, T, new_C, H * (2 ** n), W * (2 ** n))
+
+
 # -- Chunked flatten inference (no-grad, for preview only) ---------------------
 
 _CHUNK_SIZE = 24
 
 @torch.no_grad()
-def __chunked_flatten_inference(vae, bottleneck, x, amp_dtype=torch.bfloat16,
+def _chunked_flatten_inference(vae, bottleneck, x, amp_dtype=torch.bfloat16,
                                 encode_fn=None, decode_fn=None):
     _encode = encode_fn or (lambda c: vae.encode_video(c))
     _decode = decode_fn or (lambda z: vae.decode_video(z))
@@ -154,9 +211,28 @@ def save_preview(vae, bottleneck, gen, logdir, step, device, amp_dtype, T=8,
         syn_w  = cell_w * 2 + 2
 
         # -- Synthetic: 2 clips --
+        # Sample two distinct pool recipes when possible so the preview
+        # doesn't show two identical reconstructions. Fallback to fresh
+        # generate_sequence if the pool isn't compatible with pT.
         with torch.random.fork_rng():
             torch.manual_seed(step + int(time.time()) % 100000)
-            clips = gen.generate_sequence(2, T=pT)
+            has_pool = (hasattr(gen, "_recipe_pool")
+                        and gen._recipe_pool
+                        and getattr(gen, "_motion_pool_T", None) == pT)
+            if has_pool:
+                import random as _rnd
+                N = len(gen._recipe_pool)
+                idxs = _rnd.sample(range(N), k=min(2, N))
+                if len(idxs) < 2:
+                    idxs = idxs + [idxs[0]]
+                clips = torch.stack([
+                    gen._render_recipe(gen._recipe_pool[i]) for i in idxs
+                ], dim=0)
+            else:
+                # Last-resort live render; shares one effect roll across the
+                # two clips so they may look similar — but avoids a crash
+                # when preview T doesn't match the pool T.
+                clips = gen.generate_sequence(2, T=pT)
         x = clips.to(device)
         recon_vae, recon_flat, _ = _chunked_flatten_inference(
             vae, bottleneck, x, amp_dtype=amp_dtype,
@@ -274,8 +350,23 @@ def train(args):
     print(f"Loading temporal VAE from {args.vae_ckpt}...")
     ckpt = torch.load(args.vae_ckpt, map_location="cpu", weights_only=False)
     vae_config = ckpt.get("config", {})
-    ch = vae_config.get("image_channels", 3)
+    # Haar rounds: the 2D MiniVAE training script applies Haar_down
+    # _before_ encoding and Haar_up _after_ decoding. The checkpoint's
+    # `image_channels` key stores the pre-Haar channel count (usually 3)
+    # but the actual first conv was built to accept the post-Haar tensor
+    # (3 * 4^haar_rounds channels). Match that here or the shape-matched
+    # weight loader silently drops encoder.0.weight and the VAE stays at
+    # random init — which is exactly how previous runs produced solid-
+    # color garbage reconstructions in preview.
+    haar_mode = vae_config.get("haar", "none")
+    if haar_mode is True: haar_mode = "2x"
+    elif not haar_mode or haar_mode is False: haar_mode = "none"
+    haar_rounds = {"none": 0, "2x": 1, "4x": 2}.get(haar_mode, 0)
+    ch_raw = int(vae_config.get("image_channels", 3))
+    ch = ch_raw * (4 ** haar_rounds)   # post-Haar = what the conv sees
     lat_ch = vae_config.get("latent_channels", 32)
+    print(f"  haar_mode={haar_mode} (rounds={haar_rounds})  "
+          f"image_channels: {ch_raw} pre-Haar -> {ch} post-Haar")
     enc_ch_raw = vae_config.get("encoder_channels", 64)
     if isinstance(enc_ch_raw, str):
         enc_ch = tuple(int(x) for x in enc_ch_raw.split(","))
@@ -292,14 +383,28 @@ def train(args):
     else:
         dec_ch = (256, 128, 64)
 
-    enc_t_raw = vae_config.get("encoder_time_downscale", (True, True, False))
-    dec_t_raw = vae_config.get("decoder_time_upscale", (False, True, True))
+    # encoder_time_downscale / decoder_time_upscale MUST come from the
+    # checkpoint config. Guessing here was the whole problem: the
+    # shape-matched weight loader silently drops TPool/TGrow weights
+    # when the stride is wrong, so the VAE runs with random time layers
+    # and the reconstruction is garbage. Fail loud instead.
+    enc_t_raw = vae_config.get("encoder_time_downscale")
+    dec_t_raw = vae_config.get("decoder_time_upscale")
+    if enc_t_raw is None or dec_t_raw is None:
+        raise SystemExit(
+            f"VAE checkpoint at {args.vae_ckpt} is missing "
+            f"encoder_time_downscale / decoder_time_upscale in its "
+            f"config. Without these we can't build the MiniVAE with the "
+            f"right TPool/TGrow strides, and the shape-match loader "
+            f"will silently skip those weights -> random time layers "
+            f"-> garbage reconstruction. Re-save the VAE checkpoint "
+            f"with these keys in its config, or pass them explicitly.")
     if isinstance(enc_t_raw, str):
-        enc_t = tuple(x.strip() in ("True", "1") for x in enc_t_raw.split(","))
+        enc_t = tuple(x.strip().lower() in ("true", "1", "yes") for x in enc_t_raw.split(","))
     else:
         enc_t = tuple(bool(x) for x in enc_t_raw)
     if isinstance(dec_t_raw, str):
-        dec_t = tuple(x.strip() in ("True", "1") for x in dec_t_raw.split(","))
+        dec_t = tuple(x.strip().lower() in ("true", "1", "yes") for x in dec_t_raw.split(","))
     else:
         dec_t = tuple(bool(x) for x in dec_t_raw)
 
@@ -307,11 +412,35 @@ def train(args):
     use_attention = vae_config.get("use_attention", False)
     use_groupnorm = vae_config.get("use_groupnorm", False)
 
+    # Spatial downscale/upscale schedule. This was being left off the
+    # constructor, which meant MiniVAE defaulted to all-True (downsample
+    # every stage) and built a VAE with 2x more spatial compression than
+    # the checkpoint — causing 27 weights to silently shape-mismatch and
+    # the VAE to run partly at random init.
+    enc_s_raw = vae_config.get("encoder_spatial_downscale")
+    dec_s_raw = vae_config.get("decoder_spatial_upscale")
+    if enc_s_raw is not None:
+        if isinstance(enc_s_raw, str):
+            enc_s = tuple(x.strip().lower() in ("true","1","yes") for x in enc_s_raw.split(","))
+        else:
+            enc_s = tuple(bool(x) for x in enc_s_raw)
+    else:
+        enc_s = tuple([True] * len(enc_ch))
+    if dec_s_raw is not None:
+        if isinstance(dec_s_raw, str):
+            dec_s = tuple(x.strip().lower() in ("true","1","yes") for x in dec_s_raw.split(","))
+        else:
+            dec_s = tuple(bool(x) for x in dec_s_raw)
+    else:
+        dec_s = tuple([True] * len(dec_ch))
+
     vae = MiniVAE(
         latent_channels=lat_ch, image_channels=ch, output_channels=ch,
         encoder_channels=enc_ch, decoder_channels=dec_ch,
         encoder_time_downscale=enc_t,
         decoder_time_upscale=dec_t,
+        encoder_spatial_downscale=enc_s,
+        decoder_spatial_upscale=dec_s,
         residual_shortcut=residual_shortcut,
         use_attention=use_attention,
         use_groupnorm=use_groupnorm,
@@ -320,14 +449,28 @@ def train(args):
     src_sd = ckpt["model"] if "model" in ckpt else ckpt
     target_sd = vae.state_dict()
     loaded = 0
+    skipped = []
     for k, v in src_sd.items():
         if k in target_sd and v.shape == target_sd[k].shape:
             target_sd[k] = v
             loaded += 1
+        elif k in target_sd:
+            skipped.append((k, list(v.shape), list(target_sd[k].shape)))
     vae.load_state_dict(target_sd)
     vae.eval()
     vae.requires_grad_(False)
-    print(f"  VAE: {ch}ch, {lat_ch} latent, temporal 4x, frozen ({loaded} weights)")
+    print(f"  VAE: {ch}ch, {lat_ch} latent, frozen "
+          f"({loaded}/{len(src_sd)} weights)")
+    if skipped:
+        # Fail loud instead of silently running with random-init layers.
+        # This is what produced the green-mush reconstruction before.
+        print(f"  ERROR: {len(skipped)} VAE weights have shape mismatch "
+              f"against the built model. Cannot proceed — the VAE would "
+              f"run with {len(skipped)} random-init layers and produce "
+              f"garbage.")
+        for k, src_shape, tgt_shape in skipped[:10]:
+            print(f"    {k}: ckpt={src_shape} built={tgt_shape}")
+        raise SystemExit(1)
 
     # Load FSQ projections if present in checkpoint
     fsq_cfg = vae_config.get("fsq", {})
@@ -356,7 +499,18 @@ def train(args):
     has_fsq = fsq_layer is not None
 
     def encode_latent(x_in):
-        """Encode through VAE, and FSQ projections if present."""
+        """Encode a 3-channel video clip through the VAE.
+
+        If the checkpoint was trained with Haar 2x/4x (haar_rounds > 0),
+        we apply the per-frame Haar-down BEFORE the VAE so the VAE sees
+        the same post-Haar tensor its weights expect. FSQ projection
+        runs inside this function too.
+
+        Contract: callers MUST pass pre-Haar (3-channel at full spatial
+        resolution) video. The function performs the Haar internally.
+        """
+        if haar_rounds > 0:
+            x_in = _haar_down_video(x_in, haar_rounds)
         lat = vae.encode_video(x_in)
         if has_fsq:
             B, Tp, C, Hl, Wl = lat.shape
@@ -367,12 +521,22 @@ def train(args):
         return lat
 
     def decode_latent(lat_in):
-        """Decode through VAE."""
-        return vae.decode_video(lat_in)
+        """Decode through VAE and Haar-up back to 3-channel pixels if
+        the VAE was trained with Haar."""
+        out = vae.decode_video(lat_in)  # (B, T, ch_post_haar, H, W)
+        if haar_rounds > 0:
+            out = _haar_up_video(out, haar_rounds)  # -> 3 channels
+        return out
 
-    # Probe latent spatial dims
+    # Probe latent spatial dims.
+    # Feed the SAME shape the real training clips have: 3-channel video
+    # at full resolution. encode_latent() does the Haar internally, so
+    # we must not pre-Haar the probe or the latent spatial dims come
+    # out wrong (which then mis-sizes the FlattenDeflatten bottleneck
+    # and crashes at the first real training step with a shape reshape
+    # error).
     with torch.no_grad():
-        dummy = torch.randn(1, args.T, ch, args.H, args.W, device=device)
+        dummy = torch.randn(1, args.T, ch_raw, args.H, args.W, device=device)
         lat_dummy = encode_latent(dummy)
         _, Tp, lat_C, lat_H, lat_W = lat_dummy.shape
     print(f"  Latent: T'={Tp} (from T={args.T}), spatial ({lat_C}, {lat_H}, {lat_W}) "
@@ -409,12 +573,90 @@ def train(args):
     else:
         gen.build_banks()
 
-    # Motion pool for fast temporal sampling
+    # -- Effect flags for the motion pool (mirror train_video / train_video3d).
+    # Earlier runs built the pool with zero flags, which meant recipes had
+    # none of the procedural effects. All default True; random_mix drops
+    # each effect per-recipe so the pool has variety.
+    pool_kwargs = dict(
+        use_fluid=getattr(args, "use_fluid", True),
+        use_ripple=getattr(args, "use_ripple", True),
+        use_shake=getattr(args, "use_shake", True),
+        use_kaleido=getattr(args, "use_kaleido", True),
+        fast_transform=getattr(args, "fast_transform", True),
+        use_flash=getattr(args, "use_flash", True),
+        use_palette_cycle=getattr(args, "use_palette_cycle", True),
+        use_text=getattr(args, "use_text", True),
+        use_signage=getattr(args, "use_signage", True),
+        use_particles=getattr(args, "use_particles", True),
+        use_raymarch=getattr(args, "use_raymarch", True),
+        sphere_dip=getattr(args, "sphere_dip", True),
+        use_arcade=getattr(args, "use_arcade", True),
+        use_glitch=getattr(args, "use_glitch", True),
+        use_chromatic=getattr(args, "use_chromatic", True),
+        use_scanlines=getattr(args, "use_scanlines", True),
+        use_fire=getattr(args, "use_fire", True),
+        use_vortex=getattr(args, "use_vortex", True),
+        use_starfield=getattr(args, "use_starfield", True),
+        use_eq=getattr(args, "use_eq", True),
+    )
+    gen._train_pool_kwargs = pool_kwargs
+    gen._train_random_mix = getattr(args, "random_mix", True)
+
+    def _pool_health(recipes, kwargs, low=0.02, high=0.85):
+        """Same stale-pool detector as train_video3d."""
+        flag_to_key = {
+            "use_fluid": "fluid", "use_ripple": "fluid",
+            "use_shake": "shake", "use_kaleido": "kaleido",
+            "use_flash": "flash", "use_palette_cycle": "palette",
+            "use_text": "text", "use_signage": "signage",
+            "use_particles": "particles", "use_raymarch": "raymarch",
+            "sphere_dip": "raymarch", "use_arcade": "arcade",
+            "use_glitch": "glitch", "use_chromatic": "chromatic",
+            "use_scanlines": "scanline",
+            "use_fire": "fire", "use_vortex": "vortex",
+            "use_starfield": "starfield", "use_eq": "eq",
+        }
+        import random as _rnd
+        n = min(50, len(recipes))
+        sample = _rnd.sample(recipes, n) if n else []
+        problems = []
+        for flag, key in flag_to_key.items():
+            if not kwargs.get(flag):
+                continue
+            p = sum(1 for r in sample if key in r) / max(n, 1)
+            if p < low:
+                problems.append(f"MISSING {flag}->{key}")
+            elif p > high:
+                problems.append(f"OVER {flag}->{key} p={p:.2f}")
+        return problems
+
+    # Motion pool. Default: always rebuild (matches train_video3d policy).
+    # Pass --reuse-pool to opt into reusing an existing pool file.
     pool_path = os.path.join(bank_dir, "motion_pool.json")
-    if os.path.exists(pool_path):
+    reuse_requested = getattr(args, "reuse_pool", False)
+    rebuild = True
+    if reuse_requested and os.path.exists(pool_path):
         gen.load_motion_pool(pool_path)
-    else:
-        gen.build_motion_pool(n_clips=args.pool_size, T=args.T)
+        problems = _pool_health(gen._recipe_pool, pool_kwargs)
+        if problems:
+            print(f"  --reuse-pool requested but pool is stale: {problems}")
+            print(f"  Rebuilding from scratch.")
+        else:
+            rebuild = False
+            print(f"  Reusing existing pool ({len(gen._recipe_pool)} recipes)")
+    elif os.path.exists(pool_path) and not reuse_requested:
+        print(f"  Ignoring existing {pool_path} (pass --reuse-pool to reuse). "
+              f"Rebuilding to guarantee current effect distribution.")
+
+    if rebuild:
+        gen.build_motion_pool(
+            n_clips=args.pool_size, T=args.T,
+            random_mix=getattr(args, "random_mix", True), **pool_kwargs)
+        try:
+            gen.save_motion_pool(pool_path)
+        except Exception as e:
+            print(f"  (could not save rebuilt pool: {e})")
+
     if args.disco:
         gen.disco_quadrant = True
     print(f"  Generator: bank={gen.bank_size}, pool={gen.motion_pool_stats()}, "
@@ -586,6 +828,14 @@ def train(args):
                          preview_image=getattr(args, 'preview_image', None),
                          preview_frame_skip=getattr(args, 'preview_frame_skip', 0),
                          encode_fn=encode_latent, decode_fn=decode_latent)
+            # Preview peaks at several GB because it encodes+decodes two
+            # full clips plus a reference video through the VAE. Without
+            # explicit cache release the allocator's high-water mark
+            # stays resident for the rest of training. ~5-15 GB recovery.
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if step % args.save_every == 0:
             d = _make_checkpoint()
@@ -655,6 +905,40 @@ def main():
                    help="Enable disco quadrant mode")
     p.add_argument("--fresh-opt", action="store_true",
                    help="Fresh optimizer on resume")
+    # -- Pool / effect flags (mirror train_video / train_video3d) --
+    def _bool(s):
+        return str(s).strip().lower() in ("1", "true", "yes", "y", "on")
+    p.add_argument("--reuse-pool", action="store_true",
+                   help="Reuse bank/motion_pool.json if present and "
+                        "coverage checks pass. Default: rebuild every run.")
+    p.add_argument("--random-mix", type=_bool, default=True,
+                   help="Per-recipe random subset of enabled effects")
+    for flag, default, desc in [
+        ("use-fluid",         True, "fluid flow"),
+        ("use-ripple",        True, "ripple warp"),
+        ("use-shake",         True, "camera shake"),
+        ("use-kaleido",       True, "kaleidoscope"),
+        ("fast-transform",    True, "fast transforms"),
+        ("use-flash",         True, "flash frames"),
+        ("use-palette-cycle", True, "palette cycling"),
+        ("use-text",          True, "text overlays"),
+        ("use-signage",       True, "signage overlays"),
+        ("use-particles",     True, "particles"),
+        ("use-raymarch",      True, "raymarch primitives"),
+        ("sphere-dip",        True, "sphere-dip scene"),
+        ("use-arcade",        True, "arcade scenes"),
+        ("use-glitch",        True, "glitch bursts"),
+        ("use-chromatic",     True, "chromatic aberration"),
+        ("use-scanlines",     True, "scanlines"),
+        ("use-fire",          True, "fire texture"),
+        ("use-vortex",        True, "vortex swirl"),
+        ("use-starfield",     True, "starfield zoom"),
+        ("use-eq",            True, "EQ bars"),
+    ]:
+        p.add_argument(f"--{flag}",
+                       dest=flag.replace("-", "_"),
+                       default=default, type=_bool,
+                       help=f"Enable {desc} (default {default})")
     args = p.parse_args()
     train(args)
 

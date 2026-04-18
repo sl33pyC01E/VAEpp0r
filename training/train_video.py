@@ -165,9 +165,49 @@ def save_preview(model, gen, logdir, step, device, amp_dtype, T=8, preview_T=Non
         pT     = preview_T if preview_T else T
 
         # -- Synthetic: 2 clips side by side --
+        # Same path-matching logic as train_video3d: sample from the live
+        # recipe pool when T matches, else fall back to fresh render with
+        # the training pool's kwargs. Guards against the "B=2 share one
+        # effect roll" bug (both clips identical) and the "preview sees
+        # disco but training sees pool" mismatch.
         with torch.random.fork_rng():
             torch.manual_seed(step + int(time.time()) % 100000)
-            clips = gen.generate_sequence(2, T=pT)  # (2, T, 3, H, W)
+            has_pool = (hasattr(gen, "_recipe_pool")
+                        and gen._recipe_pool
+                        and getattr(gen, "_motion_pool_T", None) == pT)
+            if has_pool:
+                import random as _rnd2
+                N = len(gen._recipe_pool)
+                idxs = _rnd2.sample(range(N), k=min(2, N))
+                if len(idxs) < 2:
+                    idxs = idxs + [idxs[0]]
+                clips = torch.stack([
+                    gen._render_recipe(gen._recipe_pool[i]) for i in idxs
+                ], dim=0)
+                if step < 5:
+                    print(f"  [preview] pool path, idxs={idxs} of {N} recipes")
+            else:
+                # Fallback: render one clip at a time, re-rolling random_mix
+                # per clip so effect stacks actually differ.
+                kw_raw = getattr(gen, "_train_pool_kwargs", {}) or {}
+                rmix = bool(getattr(gen, "_train_random_mix", True))
+                def _roll(kw):
+                    if not rmix:
+                        return kw
+                    import random as _rnd
+                    drops = getattr(gen, "_RANDOM_MIX_DROPS", {}) or {}
+                    out = dict(kw)
+                    for k, p in drops.items():
+                        if out.get(k) and _rnd.random() < p:
+                            out[k] = False
+                    return out
+                parts = []
+                for _ in range(2):
+                    parts.append(gen.generate_sequence(1, T=pT, **_roll(kw_raw)))
+                clips = torch.cat(parts, dim=0)
+                if step < 5:
+                    print(f"  [preview] fallback path (pool T="
+                          f"{getattr(gen, '_motion_pool_T', None)} vs pT={pT})")
         clips = clips.to(device)
         if haar_rounds > 0:
             x = torch.stack([haar_down_n(clips[:, t], haar_rounds)
@@ -434,12 +474,92 @@ def train(args):
         gen.build_base_layers()
     else:
         gen.build_banks()
-    # Build motion clip pool
+    # -- Effect flags for the motion pool. Earlier runs built the pool with
+    # zero flags, so recipes had none of the procedural effects (ripple,
+    # shake, kaleido, flash, palette, text, signage, particles, raymarch,
+    # arcade, fire, vortex, starfield, eq). Now defaults are all ON and
+    # random_mix drops each per-recipe so the pool has variety.
+    pool_kwargs = dict(
+        use_fluid=getattr(args, "use_fluid", True),
+        use_ripple=getattr(args, "use_ripple", True),
+        use_shake=getattr(args, "use_shake", True),
+        use_kaleido=getattr(args, "use_kaleido", True),
+        fast_transform=getattr(args, "fast_transform", True),
+        use_flash=getattr(args, "use_flash", True),
+        use_palette_cycle=getattr(args, "use_palette_cycle", True),
+        use_text=getattr(args, "use_text", True),
+        use_signage=getattr(args, "use_signage", True),
+        use_particles=getattr(args, "use_particles", True),
+        use_raymarch=getattr(args, "use_raymarch", True),
+        sphere_dip=getattr(args, "sphere_dip", True),
+        use_arcade=getattr(args, "use_arcade", True),
+        use_glitch=getattr(args, "use_glitch", True),
+        use_chromatic=getattr(args, "use_chromatic", True),
+        use_scanlines=getattr(args, "use_scanlines", True),
+        use_fire=getattr(args, "use_fire", True),
+        use_vortex=getattr(args, "use_vortex", True),
+        use_starfield=getattr(args, "use_starfield", True),
+        use_eq=getattr(args, "use_eq", True),
+    )
+    gen._train_pool_kwargs = pool_kwargs
+    gen._train_random_mix = getattr(args, "random_mix", True)
+
+    def _pool_health(recipes, kwargs, low=0.02, high=0.85):
+        """Flag stale pools by prevalence check — same logic as train_video3d."""
+        flag_to_key = {
+            "use_fluid": "fluid", "use_ripple": "fluid",
+            "use_shake": "shake", "use_kaleido": "kaleido",
+            "use_flash": "flash", "use_palette_cycle": "palette",
+            "use_text": "text", "use_signage": "signage",
+            "use_particles": "particles", "use_raymarch": "raymarch",
+            "sphere_dip": "raymarch", "use_arcade": "arcade",
+            "use_glitch": "glitch", "use_chromatic": "chromatic",
+            "use_scanlines": "scanline",
+            "use_fire": "fire", "use_vortex": "vortex",
+            "use_starfield": "starfield", "use_eq": "eq",
+        }
+        import random as _rnd
+        n = min(50, len(recipes))
+        sample = _rnd.sample(recipes, n) if n else []
+        problems = []
+        for flag, key in flag_to_key.items():
+            if not kwargs.get(flag):
+                continue
+            p = sum(1 for r in sample if key in r) / max(n, 1)
+            if p < low:
+                problems.append(f"MISSING {flag}->{key}")
+            elif p > high:
+                problems.append(f"OVER {flag}->{key} p={p:.2f}")
+        return problems
+
+    # Build motion clip pool. Default: always rebuild (same policy as
+    # train_video3d). Pass --reuse-pool to opt into reusing an existing
+    # motion_pool.json — but even then, validate it's not stale before use.
     pool_path = os.path.join(bank_dir, "motion_pool.json")
-    if os.path.exists(pool_path):
+    reuse_requested = getattr(args, "reuse_pool", False)
+    rebuild = True
+    if reuse_requested and os.path.exists(pool_path):
         gen.load_motion_pool(pool_path)
-    else:
-        gen.build_motion_pool(n_clips=args.pool_size, T=args.T)
+        problems = _pool_health(gen._recipe_pool, pool_kwargs)
+        if problems:
+            print(f"  --reuse-pool requested but pool is stale: {problems}")
+            print(f"  Rebuilding from scratch.")
+        else:
+            rebuild = False
+            print(f"  Reusing existing pool ({len(gen._recipe_pool)} recipes)")
+    elif os.path.exists(pool_path) and not reuse_requested:
+        print(f"  Ignoring existing {pool_path} (pass --reuse-pool to reuse). "
+              f"Rebuilding to guarantee current effect distribution.")
+
+    if rebuild:
+        gen.build_motion_pool(
+            n_clips=args.pool_size, T=args.T,
+            random_mix=getattr(args, "random_mix", True), **pool_kwargs)
+        try:
+            gen.save_motion_pool(pool_path)
+        except Exception as e:
+            print(f"  (could not save rebuilt pool: {e})")
+
     if args.disco:
         gen.disco_quadrant = True
     print(f"Generator: bank={gen.bank_size}, layers={args.n_layers}, "
@@ -549,7 +669,11 @@ def train(args):
         if ckpt.get("scheduler"):
             sched.load_state_dict(ckpt["scheduler"])
         else:
-            # Fallback for old checkpoints: rebuild at correct position
+            # Fallback for old checkpoints: rebuild at correct position.
+            # CosineAnnealingLR with last_epoch != -1 requires 'initial_lr'
+            # in each param group — seed it from the current lr.
+            for _pg in opt.param_groups:
+                _pg.setdefault("initial_lr", _pg["lr"])
             sched = torch.optim.lr_scheduler.CosineAnnealingLR(
                 opt, T_max=args.total_steps, eta_min=float(args.lr) * 0.01,
                 last_epoch=global_step)
@@ -573,6 +697,12 @@ def train(args):
             _p.requires_grad_(_n in _temporal_param_names)
         _warmup_params = [p for p in model.parameters() if p.requires_grad]
         opt = torch.optim.AdamW(_warmup_params, lr=float(args.lr), weight_decay=0.01)
+        # CosineAnnealingLR with last_epoch != -1 requires 'initial_lr' in
+        # each param group. A freshly-built AdamW doesn't set it — seed it
+        # from the current lr before constructing the scheduler.
+        if global_step > 0:
+            for _pg in opt.param_groups:
+                _pg.setdefault("initial_lr", _pg["lr"])
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt, T_max=args.total_steps, eta_min=float(args.lr) * 0.01,
             last_epoch=global_step - 1 if global_step > 0 else -1)
@@ -885,6 +1015,42 @@ def main():
                    help="Gradient checkpointing (trade compute for memory)")
     p.add_argument("--disco", action="store_true",
                    help="Enable disco quadrant mode")
+    # -- Pool / effect flags (mirror train_video3d). All default True,
+    # random-mix drops them per-recipe so training sees variety. Pass
+    # --reuse-pool to skip the "always rebuild" policy.
+    def _bool(s):
+        return str(s).strip().lower() in ("1", "true", "yes", "y", "on")
+    p.add_argument("--reuse-pool", action="store_true",
+                   help="Reuse bank/motion_pool.json if present and "
+                        "coverage checks pass. Default: rebuild every run.")
+    p.add_argument("--random-mix", type=_bool, default=True,
+                   help="Per-recipe random subset of enabled effects")
+    for flag, default, desc in [
+        ("use-fluid",         True, "fluid flow"),
+        ("use-ripple",        True, "ripple warp"),
+        ("use-shake",         True, "camera shake"),
+        ("use-kaleido",       True, "kaleidoscope"),
+        ("fast-transform",    True, "fast transforms"),
+        ("use-flash",         True, "flash frames"),
+        ("use-palette-cycle", True, "palette cycling"),
+        ("use-text",          True, "text overlays"),
+        ("use-signage",       True, "signage overlays"),
+        ("use-particles",     True, "particles"),
+        ("use-raymarch",      True, "raymarch primitives"),
+        ("sphere-dip",        True, "sphere-dip scene"),
+        ("use-arcade",        True, "arcade scenes"),
+        ("use-glitch",        True, "glitch bursts"),
+        ("use-chromatic",     True, "chromatic aberration"),
+        ("use-scanlines",     True, "scanlines"),
+        ("use-fire",          True, "fire texture"),
+        ("use-vortex",        True, "vortex swirl"),
+        ("use-starfield",     True, "starfield zoom"),
+        ("use-eq",            True, "EQ bars"),
+    ]:
+        p.add_argument(f"--{flag}",
+                       dest=flag.replace("-", "_"),
+                       default=default, type=_bool,
+                       help=f"Enable {desc} (default {default})")
     p.add_argument("--haar", default="none", choices=["none", "2x", "4x"],
                    help="Haar wavelet pre-compression (none/2x/4x)")
     p.add_argument("--residual-shortcut", action="store_true",

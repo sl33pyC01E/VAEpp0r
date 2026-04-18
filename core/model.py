@@ -803,10 +803,30 @@ class CausalConv3d(nn.Module):
 
 
 class CausalGroupNorm(nn.Module):
-    """GroupNorm applied per-frame (causal-safe with num_groups=1 = LayerNorm)."""
+    """GroupNorm applied per-frame (causal-safe).
+
+    num_groups=1 reduces to LayerNorm. Larger groups (e.g. 8, 32) give
+    finer statistics and match 2D MiniVAE's `min(8, C//8)` convention when
+    called with num_groups=-1 (auto).
+
+    num_channels must be divisible by num_groups. When num_groups=-1,
+    chooses max(1, min(32, num_channels // 8)) and rounds down to a
+    divisor of num_channels — same spirit as the 2D heuristic.
+    """
 
     def __init__(self, num_channels, num_groups=1):
         super().__init__()
+        if num_groups == -1:
+            g = max(1, min(32, num_channels // 8))
+            # round down to a divisor of num_channels
+            while num_channels % g != 0:
+                g -= 1
+            num_groups = g
+        if num_channels % num_groups != 0:
+            raise ValueError(
+                f"CausalGroupNorm: num_channels={num_channels} not divisible "
+                f"by num_groups={num_groups}.")
+        self.num_groups = num_groups
         self.norm = nn.GroupNorm(num_groups, num_channels, eps=1e-6, affine=True)
 
     def forward(self, x):
@@ -818,15 +838,25 @@ class CausalGroupNorm(nn.Module):
 
 
 class FactorizedResBlock(nn.Module):
-    """Factorized 3D residual block: spatial (1,3,3) then temporal (3,1,1)."""
+    """Factorized 3D residual block: spatial (1,3,3) then temporal (3,1,1).
 
-    def __init__(self, in_ch, out_ch, dropout=0.0):
+    When use_groupnorm=False, the internal CausalGroupNorm layers are
+    swapped for Identity — disables normalization entirely (matches the
+    2D MiniVAE's use_groupnorm=False behavior). gn_groups controls the
+    group count when norm is active (1 = LayerNorm, -1 = auto-heuristic).
+    """
+
+    def __init__(self, in_ch, out_ch, dropout=0.0,
+                 use_groupnorm=True, gn_groups=1):
         super().__init__()
-        self.norm1 = CausalGroupNorm(in_ch)
+        def _norm(c):
+            return CausalGroupNorm(c, num_groups=gn_groups) if use_groupnorm \
+                else nn.Identity()
+        self.norm1 = _norm(in_ch)
         self.conv1_spatial = CausalConv3d(in_ch, out_ch, (1, 3, 3))
         self.conv1_temporal = CausalConv3d(out_ch, out_ch, (3, 1, 1))
 
-        self.norm2 = CausalGroupNorm(out_ch)
+        self.norm2 = _norm(out_ch)
         self.conv2_spatial = CausalConv3d(out_ch, out_ch, (1, 3, 3))
         self.conv2_temporal = CausalConv3d(out_ch, out_ch, (3, 1, 1))
 
@@ -844,11 +874,20 @@ class FactorizedResBlock(nn.Module):
 
 
 class CausalSpatialAttention(nn.Module):
-    """Per-frame spatial attention (no temporal interaction)."""
+    """Per-frame spatial attention (no temporal interaction).
 
-    def __init__(self, n_ch, num_heads=8):
+    num_heads defaults to 8 but is configurable; n_ch must be divisible
+    by num_heads. use_groupnorm=False replaces the pre-norm with Identity.
+    """
+
+    def __init__(self, n_ch, num_heads=8, use_groupnorm=True, gn_groups=1):
         super().__init__()
-        self.norm = CausalGroupNorm(n_ch)
+        if n_ch % num_heads != 0:
+            raise ValueError(
+                f"CausalSpatialAttention: n_ch={n_ch} must be divisible by "
+                f"num_heads={num_heads}.")
+        self.norm = CausalGroupNorm(n_ch, num_groups=gn_groups) if use_groupnorm \
+            else nn.Identity()
         self.qkv = nn.Conv1d(n_ch, 3 * n_ch, 1, bias=False)
         self.proj = nn.Conv1d(n_ch, n_ch, 1, bias=False)
         nn.init.zeros_(self.proj.weight)
@@ -872,11 +911,15 @@ class CausalSpatialAttention(nn.Module):
 
 
 class CausalTemporalAttention(nn.Module):
-    """Per-spatial-location temporal attention with causal mask."""
+    """Per-spatial-location temporal attention with causal mask.
 
-    def __init__(self, n_ch):
+    use_groupnorm=False replaces the pre-norm with Identity.
+    """
+
+    def __init__(self, n_ch, use_groupnorm=True, gn_groups=1):
         super().__init__()
-        self.norm = CausalGroupNorm(n_ch)
+        self.norm = CausalGroupNorm(n_ch, num_groups=gn_groups) if use_groupnorm \
+            else nn.Identity()
         self.q = nn.Conv1d(n_ch, n_ch, 1, bias=False)
         self.k = nn.Conv1d(n_ch, n_ch, 1, bias=False)
         self.v = nn.Conv1d(n_ch, n_ch, 1, bias=False)
@@ -904,13 +947,49 @@ class CausalTemporalAttention(nn.Module):
         return x + out
 
 
-class HybridDownsample3d(nn.Module):
-    """Hybrid downsampling: conv + pool summed (Cosmos-style)."""
+def _spatial_pixel_unshuffle_3d(x, factor=2):
+    """3D-compatible spatial pixel-unshuffle. (B,C,T,H,W) -> (B,C*f*f,T,H/f,W/f).
+    Pads H/W with replicate if they're not divisible by factor."""
+    B, C, T, H, W = x.shape
+    pad_h = (-H) % factor
+    pad_w = (-W) % factor
+    if pad_h or pad_w:
+        x = F.pad(x, (0, pad_w, 0, pad_h), mode="replicate")
+    Hn = x.shape[3] // factor
+    Wn = x.shape[4] // factor
+    # (B, C, T, Hn, f, Wn, f) -> move factors to the channel dim
+    x = x.reshape(B, C, T, Hn, factor, Wn, factor)
+    x = x.permute(0, 1, 4, 6, 2, 3, 5).contiguous()
+    return x.reshape(B, C * factor * factor, T, Hn, Wn)
 
-    def __init__(self, in_ch, out_ch, spatial_down=True, temporal_down=True):
+
+def _spatial_pixel_shuffle_3d(x, factor=2):
+    """Inverse of _spatial_pixel_unshuffle_3d. C must divide factor*factor."""
+    B, C, T, H, W = x.shape
+    if C % (factor * factor) != 0:
+        raise ValueError(f"shuffle: C={C} not divisible by factor^2={factor*factor}")
+    Cn = C // (factor * factor)
+    x = x.reshape(B, Cn, factor, factor, T, H, W)
+    x = x.permute(0, 1, 4, 5, 2, 6, 3).contiguous()
+    return x.reshape(B, Cn, T, H * factor, W * factor)
+
+
+class HybridDownsample3d(nn.Module):
+    """Hybrid downsampling: conv + pool summed (Cosmos-style).
+
+    If residual_shortcut=True AND spatial_down=True, adds a DC-AE-style
+    non-parametric shortcut: spatial pixel_unshuffle(2) -> mean-pool group
+    reduce to out_ch, added after the learned strided+pooled path. This
+    mirrors the 2D MiniVAE's ResidualDownsample. Temporal downsampling
+    has no shortcut (preserves causality; learned t_conv handles it).
+    """
+
+    def __init__(self, in_ch, out_ch, spatial_down=True, temporal_down=True,
+                 residual_shortcut=False):
         super().__init__()
         self.spatial_down = spatial_down
         self.temporal_down = temporal_down
+        self.residual_shortcut = bool(residual_shortcut) and spatial_down
 
         if spatial_down:
             self.s_conv = CausalConv3d(in_ch, in_ch, (1, 3, 3), stride=(1, 2, 2))
@@ -922,7 +1001,22 @@ class HybridDownsample3d(nn.Module):
             self.t_pool = nn.AvgPool3d((2, 1, 1), stride=(2, 1, 1), ceil_mode=True)
         self.out_conv = CausalConv3d(in_ch, out_ch, (1, 1, 1))
 
+        # DC-AE shortcut group size: unshuffle gives in_ch*4 channels;
+        # mean-pool groups of this size to land at out_ch.
+        if self.residual_shortcut:
+            if (in_ch * 4) % out_ch != 0:
+                raise ValueError(
+                    f"HybridDownsample3d residual_shortcut requires "
+                    f"(in_ch*4)={in_ch*4} divisible by out_ch={out_ch}. "
+                    f"Got in_ch={in_ch}, out_ch={out_ch}.")
+            self._sc_group = (in_ch * 4) // out_ch
+            self._sc_out_ch = out_ch
+
     def forward(self, x):
+        # Save input pre-spatial-down for the shortcut (before strided conv
+        # mutates the tensor).
+        sc_src = x if self.residual_shortcut else None
+
         if self.spatial_down:
             conv_out = self.s_conv(x)
             pool_out = self.s_pool(x)
@@ -938,16 +1032,39 @@ class HybridDownsample3d(nn.Module):
             # Trim to matching length
             n = min(pooled.shape[2], conv_out.shape[2])
             x = conv_out[:, :, :n] + pooled[:, :, :n]
-        return self.out_conv(x)
+
+        x = self.out_conv(x)
+
+        if self.residual_shortcut:
+            sc = _spatial_pixel_unshuffle_3d(sc_src, factor=2)
+            # sc is (B, in_ch*4, T, H/2, W/2). Group-average to out_ch.
+            B, _, Tt, Hs, Ws = sc.shape
+            sc = sc.reshape(B, self._sc_out_ch, self._sc_group, Tt, Hs, Ws
+                            ).mean(dim=2)
+            # Trim in case conv used ceil(H/2) rounding differently
+            Ht = min(x.shape[3], sc.shape[3])
+            Wt = min(x.shape[4], sc.shape[4])
+            Tt2 = min(x.shape[2], sc.shape[2])
+            x = (x[:, :, :Tt2, :Ht, :Wt]
+                 + sc[:, :, :Tt2, :Ht, :Wt])
+        return x
 
 
 class HybridUpsample3d(nn.Module):
-    """Hybrid upsampling: repeat-interleave + conv residual (Cosmos-style)."""
+    """Hybrid upsampling: repeat-interleave + conv residual (Cosmos-style).
 
-    def __init__(self, in_ch, out_ch, spatial_up=True, temporal_up=True):
+    If residual_shortcut=True AND spatial_up=True, adds a DC-AE-style
+    non-parametric shortcut: spatial pixel_shuffle(2) after a
+    channel-repeat to out_ch*4, added to the learned path. Inverse of
+    HybridDownsample3d's shortcut.
+    """
+
+    def __init__(self, in_ch, out_ch, spatial_up=True, temporal_up=True,
+                 residual_shortcut=False):
         super().__init__()
         self.spatial_up = spatial_up
         self.temporal_up = temporal_up
+        self.residual_shortcut = bool(residual_shortcut) and spatial_up
 
         if temporal_up:
             self.t_conv = CausalConv3d(in_ch, in_ch, (3, 1, 1))
@@ -955,7 +1072,22 @@ class HybridUpsample3d(nn.Module):
             self.s_conv = CausalConv3d(in_ch, in_ch, (1, 3, 3))
         self.out_conv = CausalConv3d(in_ch, out_ch, (1, 1, 1))
 
+        # DC-AE shortcut: input has in_ch channels; to pixel_shuffle to out_ch,
+        # we need out_ch*4 channels pre-shuffle. Repeat-interleave the input
+        # channels by factor (out_ch*4 // in_ch).
+        if self.residual_shortcut:
+            if (out_ch * 4) % in_ch != 0:
+                raise ValueError(
+                    f"HybridUpsample3d residual_shortcut requires "
+                    f"(out_ch*4)={out_ch*4} divisible by in_ch={in_ch}. "
+                    f"Got in_ch={in_ch}, out_ch={out_ch}.")
+            self._sc_repeat = (out_ch * 4) // in_ch
+            self._sc_out_ch = out_ch
+
     def forward(self, x):
+        # Save pre-upsample input for the shortcut (matches 2D Save/Add pattern).
+        sc_src = x if self.residual_shortcut else None
+
         if self.temporal_up:
             T = x.shape[2]
             if T > 1:
@@ -966,7 +1098,24 @@ class HybridUpsample3d(nn.Module):
         if self.spatial_up:
             x = x.repeat_interleave(2, dim=3).repeat_interleave(2, dim=4)
             x = self.s_conv(x) + x
-        return self.out_conv(x)
+
+        x = self.out_conv(x)
+
+        if self.residual_shortcut:
+            # Apply the same causal temporal upsample to the shortcut so its
+            # T matches the learned path. Without this, shortcut stays at the
+            # input T and we end up trimming x down, dropping a frame.
+            sc = sc_src
+            if self.temporal_up and sc.shape[2] > 1:
+                sc = sc.repeat_interleave(2, dim=2)[:, :, 1:]
+            sc = sc.repeat_interleave(self._sc_repeat, dim=1)
+            sc = _spatial_pixel_shuffle_3d(sc, factor=2)
+            Tt = min(x.shape[2], sc.shape[2])
+            Ht = min(x.shape[3], sc.shape[3])
+            Wt = min(x.shape[4], sc.shape[4])
+            x = (x[:, :, :Tt, :Ht, :Wt]
+                 + sc[:, :, :Tt, :Ht, :Wt])
+        return x
 
 
 class MiniVAE3D(nn.Module):
@@ -985,18 +1134,47 @@ class MiniVAE3D(nn.Module):
         latent_channels=16,
         image_channels=3,
         output_channels=3,
+        # --- Channel schedule. Preferred: pass enc_channels and dec_channels
+        # explicitly (shallow->deep for enc, deep->shallow for dec, matching
+        # VideoTrainTab's Enc ch / Dec ch convention and the 2D MiniVAE's
+        # encoder_channels/decoder_channels pattern). Legacy: if those are
+        # None, fall back to base_channels * channel_mult to build a
+        # symmetric encoder/decoder, keeping old checkpoints loadable.
+        enc_channels=None,           # e.g. (64, 128, 256, 256)  shallow->deep
+        dec_channels=None,           # e.g. (256, 256, 128, 64)  deep->shallow
         base_channels=64,
         channel_mult=(1, 2, 4, 4),
         num_res_blocks=2,
         temporal_downsample=None,
         spatial_downsample=None,
-        attn_at_deepest=True,
+        # -- Arch extras (parity with 2D MiniVAE + DC-AE) --
+        use_attention=None,          # attention at deepest level only.
+                                     # None = use attn_at_deepest for
+                                     # back-compat; True/False overrides.
+        use_groupnorm=True,          # CausalGroupNorm inside every res
+                                     # block + attention. False = Identity.
+        residual_shortcut=False,     # DC-AE-style spatial pixel-unshuffle
+                                     # shortcut inside every Hybrid(Down|Up)
+                                     # sample3d. Spatial-only (temporal
+                                     # dim has no shortcut so causality
+                                     # isn't broken).
+        attn_heads=8,                # heads in CausalSpatialAttention
+        gn_groups=1,                 # num_groups for CausalGroupNorm.
+                                     # 1 = LayerNorm behavior; -1 = auto
+                                     # heuristic matching 2D MiniVAE.
+        attn_at_deepest=True,        # [legacy] only consulted when
+                                     # use_attention is None.
         dropout=0.0,
         haar_levels=0,               # 0=off, 1=8x, 2=64x (spatial*temporal)
         fsq=False,                   # enable residual FSQ quantizer
         fsq_levels=(8, 8, 8, 5, 5, 5),
         fsq_stages=4,
-        fsq_embedding_dim=6,         # dim projected in/out of FSQ
+        fsq_embedding_dim=None,      # dim projected in/out of FSQ; if None,
+                                     # locked to len(fsq_levels) so they can't
+                                     # drift out of sync (passing a 4-long
+                                     # levels list with default embedding=6
+                                     # crashed FSQ._bound with a 6-vs-4 shape
+                                     # mismatch).
     ):
         super().__init__()
         self.latent_channels = latent_channels
@@ -1005,15 +1183,67 @@ class MiniVAE3D(nn.Module):
         self.haar_levels = haar_levels
         self.use_fsq = fsq
 
-        n_levels = len(channel_mult)
-        channels = [base_channels * m for m in channel_mult]
+        # Resolve use_attention. Old callers passed attn_at_deepest; new
+        # callers pass use_attention. Both mean the same thing here
+        # (attention at deepest level only) — if use_attention is None,
+        # fall back to attn_at_deepest.
+        self.use_attention = bool(attn_at_deepest) if use_attention is None \
+            else bool(use_attention)
+        self.use_groupnorm = bool(use_groupnorm)
+        self.residual_shortcut = bool(residual_shortcut)
+        self.attn_heads = int(attn_heads)
+        self.gn_groups = int(gn_groups)
+
+        # Ensure FSQ inner channel count matches len(levels). Allow explicit
+        # override for backward compat, but error loudly if it disagrees
+        # with len(levels) so the bug can't come back silently.
+        if fsq_embedding_dim is None:
+            fsq_embedding_dim = len(fsq_levels)
+        elif fsq_embedding_dim != len(fsq_levels):
+            raise ValueError(
+                f"fsq_embedding_dim={fsq_embedding_dim} must equal "
+                f"len(fsq_levels)={len(fsq_levels)} "
+                f"(levels={tuple(fsq_levels)}). "
+                f"Pass fsq_embedding_dim=None to have it inferred.")
+
+        # Resolve the channel schedule. If enc/dec not given, derive a
+        # symmetric schedule from the legacy base_channels*channel_mult.
+        if enc_channels is None and dec_channels is None:
+            enc_channels = tuple(base_channels * m for m in channel_mult)
+            # Legacy default was symmetric, so decoder mirrors encoder in
+            # processing order (deep->shallow).
+            dec_channels = tuple(reversed(enc_channels))
+        elif enc_channels is None or dec_channels is None:
+            raise ValueError(
+                "Pass BOTH enc_channels and dec_channels, or NEITHER "
+                "(to use the legacy base_channels*channel_mult fallback).")
+        enc_channels = tuple(int(c) for c in enc_channels)
+        dec_channels = tuple(int(c) for c in dec_channels)
+
+        if len(enc_channels) != len(dec_channels):
+            raise ValueError(
+                f"len(enc_channels)={len(enc_channels)} must equal "
+                f"len(dec_channels)={len(dec_channels)} (same number of "
+                f"resolution levels; matches temporal/spatial_downsample).")
+        if enc_channels[-1] != dec_channels[0]:
+            raise ValueError(
+                f"Bottleneck width mismatch: enc_channels[-1]="
+                f"{enc_channels[-1]} must equal dec_channels[0]="
+                f"{dec_channels[0]}. No projection layer is inserted "
+                f"between encoder and decoder at the bottleneck.")
+
+        n_levels = len(enc_channels)
+        self.enc_channels = enc_channels
+        self.dec_channels = dec_channels
 
         if temporal_downsample is None:
             temporal_downsample = tuple([True] * n_levels)
         if spatial_downsample is None:
             spatial_downsample = tuple([True] * n_levels)
-        assert len(temporal_downsample) == n_levels
-        assert len(spatial_downsample) == n_levels
+        assert len(temporal_downsample) == n_levels, \
+            f"temporal_downsample len {len(temporal_downsample)} != {n_levels} levels"
+        assert len(spatial_downsample) == n_levels, \
+            f"spatial_downsample len {len(spatial_downsample)} != {n_levels} levels"
 
         self.temporal_downsample = temporal_downsample
         self.spatial_downsample = spatial_downsample
@@ -1040,69 +1270,102 @@ class MiniVAE3D(nn.Module):
             self.quant_proj_out = None
             self.quantizer = None
 
+        # Helpers that thread the new extras kwargs through every
+        # sub-module construction so none of them have to be hardcoded.
+        def _rb(ci, co):
+            return FactorizedResBlock(ci, co, dropout,
+                                      use_groupnorm=self.use_groupnorm,
+                                      gn_groups=self.gn_groups)
+        def _sattn(c):
+            return CausalSpatialAttention(c, num_heads=self.attn_heads,
+                                          use_groupnorm=self.use_groupnorm,
+                                          gn_groups=self.gn_groups)
+        def _tattn(c):
+            return CausalTemporalAttention(c,
+                                           use_groupnorm=self.use_groupnorm,
+                                           gn_groups=self.gn_groups)
+        def _gn(c):
+            return CausalGroupNorm(c, num_groups=self.gn_groups) \
+                if self.use_groupnorm else nn.Identity()
+
         # -- Encoder --
+        # Iterates enc_channels shallow->deep; temporal/spatial_downsample
+        # are indexed in the same order (level i uses *_downsample[i]).
         enc = nn.ModuleList()
         # Input conv (factorized)
-        enc.append(CausalConv3d(enc_in_ch, channels[0], (1, 3, 3)))
-        enc.append(CausalConv3d(channels[0], channels[0], (3, 1, 1)))
+        enc.append(CausalConv3d(enc_in_ch, enc_channels[0], (1, 3, 3)))
+        enc.append(CausalConv3d(enc_channels[0], enc_channels[0], (3, 1, 1)))
 
         for i in range(n_levels):
-            ch_in = channels[i - 1] if i > 0 else channels[0]
-            ch_out = channels[i]
+            ch_in = enc_channels[i - 1] if i > 0 else enc_channels[0]
+            ch_out = enc_channels[i]
             # Res blocks
             for j in range(num_res_blocks):
-                enc.append(FactorizedResBlock(ch_in if j == 0 else ch_out, ch_out, dropout))
+                enc.append(_rb(ch_in if j == 0 else ch_out, ch_out))
             # Attention at deepest
-            if attn_at_deepest and i == n_levels - 1:
-                enc.append(CausalSpatialAttention(ch_out))
-                enc.append(CausalTemporalAttention(ch_out))
-            # Downsample
-            enc.append(HybridDownsample3d(ch_out, ch_out,
-                                          spatial_down=spatial_downsample[i],
-                                          temporal_down=temporal_downsample[i]))
-        # Mid block
-        ch_mid = channels[-1]
-        enc.append(FactorizedResBlock(ch_mid, ch_mid, dropout))
-        enc.append(CausalSpatialAttention(ch_mid))
-        enc.append(CausalTemporalAttention(ch_mid))
-        enc.append(FactorizedResBlock(ch_mid, ch_mid, dropout))
+            if self.use_attention and i == n_levels - 1:
+                enc.append(_sattn(ch_out))
+                enc.append(_tattn(ch_out))
+            # Downsample (with optional DC-AE spatial shortcut)
+            enc.append(HybridDownsample3d(
+                ch_out, ch_out,
+                spatial_down=spatial_downsample[i],
+                temporal_down=temporal_downsample[i],
+                residual_shortcut=self.residual_shortcut))
+        # Mid block — bottleneck width is enc_channels[-1] (== dec_channels[0]
+        # per the earlier assertion; no projection layer between them).
+        ch_mid = enc_channels[-1]
+        enc.append(_rb(ch_mid, ch_mid))
+        enc.append(_sattn(ch_mid))
+        enc.append(_tattn(ch_mid))
+        enc.append(_rb(ch_mid, ch_mid))
         # Output conv
-        enc.append(CausalGroupNorm(ch_mid))
+        enc.append(_gn(ch_mid))
         enc.append(nn.SiLU())
         enc.append(CausalConv3d(ch_mid, latent_channels, (1, 3, 3)))
         enc.append(CausalConv3d(latent_channels, latent_channels, (3, 1, 1)))
         self.encoder = enc
 
         # -- Decoder --
+        # dec_channels is in processing order (deep->shallow), so we iterate
+        # it forward. Level i runs the upsample at dec_channels[i] width,
+        # and the downsample-list lookup has to mirror the encoder's:
+        # decoder level i corresponds to encoder level (n_levels-1-i).
         dec = nn.ModuleList()
-        # Input conv (factorized)
-        dec.append(CausalConv3d(latent_channels, ch_mid, (1, 3, 3)))
-        dec.append(CausalConv3d(ch_mid, ch_mid, (3, 1, 1)))
-        # Mid block
-        dec.append(FactorizedResBlock(ch_mid, ch_mid, dropout))
-        dec.append(CausalSpatialAttention(ch_mid))
-        dec.append(CausalTemporalAttention(ch_mid))
-        dec.append(FactorizedResBlock(ch_mid, ch_mid, dropout))
+        # Input conv (factorized) at bottleneck width (== dec_channels[0])
+        ch_bott = dec_channels[0]
+        dec.append(CausalConv3d(latent_channels, ch_bott, (1, 3, 3)))
+        dec.append(CausalConv3d(ch_bott, ch_bott, (3, 1, 1)))
+        # Mid block at bottleneck width
+        dec.append(_rb(ch_bott, ch_bott))
+        dec.append(_sattn(ch_bott))
+        dec.append(_tattn(ch_bott))
+        dec.append(_rb(ch_bott, ch_bott))
 
-        ch_prev = ch_mid
-        for i in range(n_levels - 1, -1, -1):
-            ch_out = channels[i]
-            # Upsample
-            dec.append(HybridUpsample3d(ch_prev, ch_out,
-                                        spatial_up=spatial_downsample[i],
-                                        temporal_up=temporal_downsample[i]))
+        ch_prev = ch_bott
+        for i in range(n_levels):
+            ch_out = dec_channels[i]
+            # Index into down schedules in encoder order: deepest encoder
+            # level (n_levels-1) corresponds to the FIRST upsample (i=0).
+            enc_level = n_levels - 1 - i
+            # Upsample (with optional DC-AE spatial shortcut)
+            dec.append(HybridUpsample3d(
+                ch_prev, ch_out,
+                spatial_up=spatial_downsample[enc_level],
+                temporal_up=temporal_downsample[enc_level],
+                residual_shortcut=self.residual_shortcut))
             # Res blocks
             for j in range(num_res_blocks):
-                dec.append(FactorizedResBlock(ch_out, ch_out, dropout))
-            # Attention at deepest (which is first in decoder)
-            if attn_at_deepest and i == n_levels - 1:
-                dec.append(CausalSpatialAttention(ch_out))
-                dec.append(CausalTemporalAttention(ch_out))
+                dec.append(_rb(ch_out, ch_out))
+            # Attention at deepest (the first decoder block, since we start deep)
+            if self.use_attention and i == 0:
+                dec.append(_sattn(ch_out))
+                dec.append(_tattn(ch_out))
             ch_prev = ch_out
 
-        # Output conv
-        ch_final = channels[0]
-        dec.append(CausalGroupNorm(ch_final))
+        # Output conv at the shallowest decoder width
+        ch_final = dec_channels[-1]
+        dec.append(_gn(ch_final))
         dec.append(nn.SiLU())
         dec.append(CausalConv3d(ch_final, dec_out_ch, (1, 3, 3)))
         dec.append(CausalConv3d(dec_out_ch, dec_out_ch, (3, 1, 1)))
@@ -1111,6 +1374,29 @@ class MiniVAE3D(nn.Module):
         # Total compression (including Haar)
         self.t_downscale = (2 ** sum(temporal_downsample)) * (2 ** haar_levels)
         self.s_downscale = (2 ** sum(spatial_downsample)) * (2 ** haar_levels)
+
+    def config_summary(self):
+        """Return a multi-line summary of the model's arch + extras.
+
+        Called by training scripts and by ConvertTab's Verify so the
+        full configuration is visible at a glance — no hidden
+        hardcoded values.
+        """
+        lines = [
+            f"  enc_channels={tuple(self.enc_channels)}",
+            f"  dec_channels={tuple(self.dec_channels)}",
+            f"  temporal_downsample={tuple(self.temporal_downsample)}",
+            f"  spatial_downsample={tuple(self.spatial_downsample)}",
+            f"  haar_levels={self.haar_levels}",
+            f"  t_downscale={self.t_downscale}  s_downscale={self.s_downscale}",
+            f"  fsq={self.use_fsq}",
+            f"  use_attention={self.use_attention}  "
+            f"attn_heads={self.attn_heads}",
+            f"  use_groupnorm={self.use_groupnorm}  "
+            f"gn_groups={self.gn_groups}",
+            f"  residual_shortcut={self.residual_shortcut}  (DC-AE, spatial-only)",
+        ]
+        return "\n".join(lines)
 
     def _run_modules(self, modules, x):
         for m in modules:

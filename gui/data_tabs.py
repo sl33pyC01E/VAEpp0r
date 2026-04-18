@@ -105,6 +105,16 @@ class GeneratorTab(tk.Frame):
         br2.pack(fill="x", pady=2)
         make_btn(br2, "Generate 1", self.gen_sample, ACCENT, 12).pack(side="left", padx=(0, 3))
         make_btn(br2, "Generate 8", self.gen_batch, ACCENT, 12).pack(side="left")
+        br2b = tk.Frame(L, bg=BG_PANEL)
+        br2b.pack(fill="x", pady=2)
+        make_btn(br2b, "Disco 1", self.gen_disco_sample, "#dd44dd", 12).pack(side="left", padx=(0, 3))
+        make_btn(br2b, "Disco 8", self.gen_disco_grid, "#dd44dd", 12).pack(side="left")
+        br2c = tk.Frame(L, bg=BG_PANEL)
+        br2c.pack(fill="x", pady=2)
+        self.random_mix_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(br2c, text="Random mix",
+                       variable=self.random_mix_var, bg=BG_PANEL, fg="#ffaa44",
+                       selectcolor=BG_INPUT, font=FONT).pack(side="left")
         br3 = tk.Frame(L, bg=BG_PANEL)
         br3.pack(fill="x", pady=2)
         make_btn(br3, "Load Bank", self.load_bank, BLUE, 12).pack(side="left", padx=(0, 3))
@@ -122,7 +132,7 @@ class GeneratorTab(tk.Frame):
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
         br_rip = tk.Frame(L, bg=BG_PANEL)
         br_rip.pack(fill="x", pady=2)
-        self.ripple_var = tk.BooleanVar(value=False)
+        self.ripple_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_rip, text="Enable", variable=self.ripple_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -138,11 +148,11 @@ class GeneratorTab(tk.Frame):
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
         br_eff = tk.Frame(L, bg=BG_PANEL)
         br_eff.pack(fill="x", pady=2)
-        self.shake_var = tk.BooleanVar(value=False)
+        self.shake_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_eff, text="Shake", variable=self.shake_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.kaleido_var = tk.BooleanVar(value=False)
+        self.kaleido_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_eff, text="Kaleidoscope", variable=self.kaleido_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -156,11 +166,11 @@ class GeneratorTab(tk.Frame):
         # Flash + palette static toggles (Phase 3)
         br_eff3 = tk.Frame(L, bg=BG_PANEL)
         br_eff3.pack(fill="x", pady=2)
-        self.flash_var = tk.BooleanVar(value=False)
+        self.flash_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_eff3, text="Flash", variable=self.flash_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.palette_var = tk.BooleanVar(value=False)
+        self.palette_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_eff3, text="Palette shift", variable=self.palette_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -174,7 +184,7 @@ class GeneratorTab(tk.Frame):
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
         br_txt = tk.Frame(L, bg=BG_PANEL)
         br_txt.pack(fill="x", pady=2)
-        self.text_var = tk.BooleanVar(value=False)
+        self.text_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_txt, text="Enable", variable=self.text_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -192,7 +202,7 @@ class GeneratorTab(tk.Frame):
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
         br_sig = tk.Frame(L, bg=BG_PANEL)
         br_sig.pack(fill="x", pady=2)
-        self.signage_var = tk.BooleanVar(value=False)
+        self.signage_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_sig, text="Enable", variable=self.signage_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -211,7 +221,7 @@ class GeneratorTab(tk.Frame):
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
         br_par = tk.Frame(L, bg=BG_PANEL)
         br_par.pack(fill="x", pady=2)
-        self.particles_var = tk.BooleanVar(value=False)
+        self.particles_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_par, text="Enable", variable=self.particles_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -229,7 +239,7 @@ class GeneratorTab(tk.Frame):
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
         br_rm = tk.Frame(L, bg=BG_PANEL)
         br_rm.pack(fill="x", pady=2)
-        self.raymarch_var = tk.BooleanVar(value=False)
+        self.raymarch_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_rm, text="Enable", variable=self.raymarch_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -245,7 +255,7 @@ class GeneratorTab(tk.Frame):
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
         br_ar = tk.Frame(L, bg=BG_PANEL)
         br_ar.pack(fill="x", pady=2)
-        self.arcade_var = tk.BooleanVar(value=False)
+        self.arcade_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_ar, text="Enable", variable=self.arcade_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -259,21 +269,21 @@ class GeneratorTab(tk.Frame):
                  font=FONT_BOLD).pack(anchor="w", pady=(10, 0))
         br_ex = tk.Frame(L, bg=BG_PANEL)
         br_ex.pack(fill="x", pady=2)
-        self.fire_var = tk.BooleanVar(value=False)
+        self.fire_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_ex, text="Fire", variable=self.fire_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.vortex_var = tk.BooleanVar(value=False)
+        self.vortex_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_ex, text="Vortex", variable=self.vortex_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
         br_ex2 = tk.Frame(L, bg=BG_PANEL)
         br_ex2.pack(fill="x", pady=2)
-        self.starfield_var = tk.BooleanVar(value=False)
+        self.starfield_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_ex2, text="Starfield", variable=self.starfield_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.eq_var = tk.BooleanVar(value=False)
+        self.eq_var = tk.BooleanVar(value=True)
         tk.Checkbutton(br_ex2, text="EQ bars", variable=self.eq_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -449,47 +459,60 @@ class GeneratorTab(tk.Frame):
         self.update()
         run_with_log(self, gen.refresh_base_layers, on_done=self._update_stats)
 
-    def _apply_ripple_settings(self, gen):
-        """Push GUI ripple/shake/kaleido toggles onto the generator instance."""
-        gen.static_ripple = bool(self.ripple_var.get())
+    def _apply_ripple_settings(self, gen, random_mix=False):
+        """Push GUI ripple/shake/kaleido toggles onto the generator instance.
+        When random_mix=True, each effect has a per-effect drop probability
+        so visually loud effects (EQ, fire, starfield, arcade) are rarer
+        than subtle post-FX (shake, palette)."""
+        import random as _rnd
+        def _pick(var, p=0.5):
+            v = bool(var.get())
+            if random_mix and v and _rnd.random() < p:
+                return False
+            return v
+        gen.static_ripple = _pick(self.ripple_var, 0.50)
         gen.static_ripple_warp_strength = float(self.ripple_warp.get())
         gen.static_ripple_n_drops = int(self.ripple_drops.get())
-        gen.static_shake = bool(self.shake_var.get())
+        gen.static_shake = _pick(self.shake_var, 0.30)
         gen.static_shake_amp_xy = float(self.shake_amp.get())
         gen.static_shake_amp_rot = float(self.shake_amp.get())
         gen.static_shake_mode = "vibrate"
-        gen.static_kaleido = bool(self.kaleido_var.get())
+        gen.static_kaleido = _pick(self.kaleido_var, 0.50)
         gen.static_kaleido_slices = int(self.kaleido_slices.get())
-        gen.static_flash = bool(self.flash_var.get())
-        gen.static_palette = bool(self.palette_var.get())
+        gen.static_flash = _pick(self.flash_var, 0.55)
+        gen.static_palette = _pick(self.palette_var, 0.40)
         gen.static_palette_shift = float(self.palette_speed.get())
-        gen.static_text = bool(self.text_var.get())
+        gen.static_text = _pick(self.text_var, 0.70)
         gen.static_text_mode = "typing"
         gen.static_text_lang = self.text_lang_var.get()
         gen.static_text_size = int(self.text_size.get())
         gen.static_text_cps = 12.0
-        gen.static_signage = bool(self.signage_var.get())
+        gen.static_signage = _pick(self.signage_var, 0.75)
         gen.static_signage_mode = self.signage_mode_var.get()
         gen.static_signage_size = int(self.signage_size.get())
-        gen.static_particles = bool(self.particles_var.get())
+        gen.static_particles = _pick(self.particles_var, 0.55)
         gen.static_particles_preset = self.particles_preset_var.get()
         gen.static_particles_n = int(self.particles_n.get())
-        gen.static_raymarch = bool(self.raymarch_var.get())
+        gen.static_raymarch = _pick(self.raymarch_var, 0.60)
         gen.static_raymarch_spheres = int(self.raymarch_spheres.get())
         gen.static_raymarch_steps = int(self.raymarch_steps.get())
-        gen.static_arcade = bool(self.arcade_var.get())
+        gen.static_arcade = _pick(self.arcade_var, 0.80)
         gen.static_arcade_mode = self.arcade_mode_var.get()
-        gen.static_fire = bool(self.fire_var.get())
-        gen.static_vortex = bool(self.vortex_var.get())
-        gen.static_starfield = bool(self.starfield_var.get())
-        gen.static_eq = bool(self.eq_var.get())
+        gen.static_fire = _pick(self.fire_var, 0.80)
+        gen.static_vortex = _pick(self.vortex_var, 0.80)
+        gen.static_starfield = _pick(self.starfield_var, 0.80)
+        gen.static_eq = _pick(self.eq_var, 0.88)
+
+    def _random_mix_on(self):
+        return bool(getattr(self, "random_mix_var", None)
+                    and self.random_mix_var.get())
 
     def gen_sample(self):
         gen = self._get_gen()
         if gen.base_layers is None:
             self.build_banks()
             return
-        self._apply_ripple_settings(gen)
+        self._apply_ripple_settings(gen, random_mix=self._random_mix_on())
         with torch.no_grad():
             batch = gen.generate(1)
         img = (batch[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
@@ -500,15 +523,74 @@ class GeneratorTab(tk.Frame):
         if gen.base_layers is None:
             self.build_banks()
             return
-        self._apply_ripple_settings(gen)
+        mix = self._random_mix_on()
+        # Loop B=1 eight times so per-sample effect flags are re-rolled and
+        # each tile gets its own independent effect stack (otherwise all 8
+        # samples share the one-shot static_* toggles and look identical).
+        imgs_np = []
         with torch.no_grad():
-            batch = gen.generate(8)
-        imgs = [(batch[i].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-                for i in range(8)]
-        H, W = imgs[0].shape[:2]
+            for _ in range(8):
+                self._apply_ripple_settings(gen, random_mix=mix)
+                batch = gen.generate(1)
+                imgs_np.append(
+                    (batch[0].permute(1, 2, 0).cpu().numpy() * 255
+                     ).astype(np.uint8))
+        H, W = imgs_np[0].shape[:2]
         gap = 4
         grid = np.full((H * 2 + gap, W * 4 + gap * 3, 3), 14, dtype=np.uint8)
-        for i, img in enumerate(imgs):
+        for i, img in enumerate(imgs_np):
+            r, c = i // 4, i % 4
+            grid[r * (H + gap):r * (H + gap) + H,
+                 c * (W + gap):c * (W + gap) + W] = img
+        self._show_image(Image.fromarray(grid))
+
+    def gen_disco_sample(self):
+        """Single static sample using disco quadrant mode."""
+        gen = self._get_gen()
+        if gen.base_layers is None:
+            self.build_banks()
+            return
+        self._apply_ripple_settings(gen, random_mix=self._random_mix_on())
+        prev_disco = gen.disco_quadrant
+        gen.disco_quadrant = True
+        try:
+            with torch.no_grad():
+                batch = gen.generate(1)
+        finally:
+            gen.disco_quadrant = prev_disco
+        img = (batch[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        self._show_image(Image.fromarray(img))
+
+    def gen_disco_grid(self):
+        """8 static samples, one per disco quadrant."""
+        gen = self._get_gen()
+        if gen.base_layers is None:
+            self.build_banks()
+            return
+        mix = self._random_mix_on()
+        prev_disco = gen.disco_quadrant
+        prev_weights = gen._disco_weights.clone()
+        gen.disco_quadrant = True
+        imgs_np = []
+        try:
+            n_q = int(prev_weights.shape[0])
+            with torch.no_grad():
+                for q in range(min(8, n_q)):
+                    w = torch.zeros_like(prev_weights)
+                    w[q] = 1.0
+                    gen._disco_weights = w
+                    self._apply_ripple_settings(gen, random_mix=mix)
+                    batch = gen.generate(1)
+                    imgs_np.append(
+                        (batch[0].permute(1, 2, 0).cpu().numpy() * 255
+                         ).astype(np.uint8))
+        finally:
+            gen.disco_quadrant = prev_disco
+            gen._disco_weights = prev_weights
+        H, W = imgs_np[0].shape[:2]
+        gap = 4
+        grid = np.full((H * 2 + gap, W * 4 + gap * 3, 3), 14, dtype=np.uint8)
+        for i, img in enumerate(imgs_np):
             r, c = i // 4, i % 4
             grid[r * (H + gap):r * (H + gap) + H,
                  c * (W + gap):c * (W + gap) + W] = img
@@ -560,11 +642,11 @@ class GeneratorTab(tk.Frame):
                 fp = os.path.join(bank_dir, f)
                 if os.path.isfile(fp):
                     os.remove(fp)
-        if self.gen is not None:
-            self.gen.shape_bank = None
-            self.gen.base_layers = None
-            self.gen.bank_size = 0
-            self.gen._recipe_pool = []
+        # Drop the whole generator so the next _get_gen() builds fresh from
+        # the current GUI config (bank_size spinbox, etc). Zeroing fields on
+        # the existing instance leaves bank_size=0 and crashes build_shape_bank
+        # with `torch.stack([])`.
+        self.gen = None
         self._update_stats()
         self._bank_thumbs = []
         self.bank_canvas.delete("all")
@@ -745,7 +827,7 @@ class VideoGenTab(tk.Frame):
             side="left", padx=(0, 10))
         make_btn(btn_row, "Build Banks", self.build_banks, BLUE).pack(
             side="left", padx=(0, 5))
-        make_btn(btn_row, "Delete Banks", self.delete_banks, RED).pack(
+        make_btn(btn_row, "Reset Video", self.delete_banks, RED).pack(
             side="left", padx=(0, 10))
         make_btn(btn_row, "Build Pool", self.build_pool, GREEN).pack(
             side="left", padx=(0, 5))
@@ -807,7 +889,7 @@ class VideoGenTab(tk.Frame):
         # Checkboxes
         row2b = tk.Frame(config, bg=BG_PANEL)
         row2b.pack(fill="x", pady=(2, 0))
-        self.random_mix_var = tk.BooleanVar(value=False)
+        self.random_mix_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2b, text="Random mix",
                        variable=self.random_mix_var, bg=BG_PANEL, fg="#ffaa44",
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
@@ -835,11 +917,11 @@ class VideoGenTab(tk.Frame):
         tk.Checkbutton(row2b, text="Viewport",
                        variable=self.viewport_var, bg=BG_PANEL, fg=FG,
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
-        self.fluid_var = tk.BooleanVar(value=False)
+        self.fluid_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2b, text="Fluid",
                        variable=self.fluid_var, bg=BG_PANEL, fg=FG,
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
-        self.ripple_var = tk.BooleanVar(value=False)
+        self.ripple_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2b, text="Ripple",
                        variable=self.ripple_var, bg=BG_PANEL, fg=FG,
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
@@ -867,18 +949,18 @@ class VideoGenTab(tk.Frame):
         # Effects row (Phase 2): shake, kaleidoscope, fast transforms
         row2e = tk.Frame(config, bg=BG_PANEL)
         row2e.pack(fill="x", pady=(2, 0))
-        self.shake_var = tk.BooleanVar(value=False)
+        self.shake_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2e, text="Shake",
                        variable=self.shake_var, bg=BG_PANEL, fg=FG,
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
         self.shake_mode_var = tk.StringVar(value="vibrate")
         tk.OptionMenu(row2e, self.shake_mode_var,
                       "vibrate", "earthquake", "handheld").pack(side="left", padx=(0, 6))
-        self.kaleido_var = tk.BooleanVar(value=False)
+        self.kaleido_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2e, text="Kaleidoscope",
                        variable=self.kaleido_var, bg=BG_PANEL, fg=FG,
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
-        self.fast_tx_var = tk.BooleanVar(value=False)
+        self.fast_tx_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2e, text="Fast transforms",
                        variable=self.fast_tx_var, bg=BG_PANEL, fg=FG,
                        selectcolor=BG_INPUT, font=FONT).pack(side="left")
@@ -898,11 +980,11 @@ class VideoGenTab(tk.Frame):
         # Flash / strobe / palette row (Phase 3)
         row2g = tk.Frame(config, bg=BG_PANEL)
         row2g.pack(fill="x", pady=(2, 0))
-        self.flash_var = tk.BooleanVar(value=False)
+        self.flash_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2g, text="Flash", variable=self.flash_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.palette_var = tk.BooleanVar(value=False)
+        self.palette_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2g, text="Palette cycle", variable=self.palette_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -918,7 +1000,7 @@ class VideoGenTab(tk.Frame):
         # Text overlay (Phase 4)
         row2i = tk.Frame(config, bg=BG_PANEL)
         row2i.pack(fill="x", pady=(2, 0))
-        self.text_var = tk.BooleanVar(value=False)
+        self.text_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2i, text="Text", variable=self.text_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -942,7 +1024,7 @@ class VideoGenTab(tk.Frame):
         # Signage (Phase 5)
         row2k = tk.Frame(config, bg=BG_PANEL)
         row2k.pack(fill="x", pady=(2, 0))
-        self.signage_var = tk.BooleanVar(value=False)
+        self.signage_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2k, text="Signage", variable=self.signage_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -957,7 +1039,7 @@ class VideoGenTab(tk.Frame):
         # Particles (Phase 6)
         row2l = tk.Frame(config, bg=BG_PANEL)
         row2l.pack(fill="x", pady=(2, 0))
-        self.particles_var = tk.BooleanVar(value=False)
+        self.particles_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2l, text="Particles", variable=self.particles_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -971,11 +1053,11 @@ class VideoGenTab(tk.Frame):
         # Raymarch (Phase 7)
         row2m = tk.Frame(config, bg=BG_PANEL)
         row2m.pack(fill="x", pady=(2, 0))
-        self.raymarch_var = tk.BooleanVar(value=False)
+        self.raymarch_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2m, text="3D (SDF)", variable=self.raymarch_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.sphere_dip_var = tk.BooleanVar(value=False)
+        self.sphere_dip_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2m, text="Sphere dip", variable=self.sphere_dip_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left", padx=(0, 6))
@@ -987,7 +1069,7 @@ class VideoGenTab(tk.Frame):
         # Arcade (Phase 8)
         row2n = tk.Frame(config, bg=BG_PANEL)
         row2n.pack(fill="x", pady=(2, 0))
-        self.arcade_var = tk.BooleanVar(value=False)
+        self.arcade_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2n, text="Arcade", variable=self.arcade_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -999,15 +1081,15 @@ class VideoGenTab(tk.Frame):
         # Glitch / chromatic / scanlines / grain (Phase 9)
         row2o = tk.Frame(config, bg=BG_PANEL)
         row2o.pack(fill="x", pady=(2, 0))
-        self.glitch_var = tk.BooleanVar(value=False)
+        self.glitch_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2o, text="Glitch", variable=self.glitch_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.chromatic_var = tk.BooleanVar(value=False)
+        self.chromatic_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2o, text="Chromatic", variable=self.chromatic_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.scanlines_var = tk.BooleanVar(value=False)
+        self.scanlines_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2o, text="Scanlines", variable=self.scanlines_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -1023,19 +1105,19 @@ class VideoGenTab(tk.Frame):
         # Extras (Phase 10): fire / vortex / starfield / eq
         row2q = tk.Frame(config, bg=BG_PANEL)
         row2q.pack(fill="x", pady=(2, 0))
-        self.fire_var = tk.BooleanVar(value=False)
+        self.fire_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2q, text="Fire", variable=self.fire_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.vortex_var = tk.BooleanVar(value=False)
+        self.vortex_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2q, text="Vortex", variable=self.vortex_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.starfield_var = tk.BooleanVar(value=False)
+        self.starfield_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2q, text="Starfield", variable=self.starfield_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
-        self.eq_var = tk.BooleanVar(value=False)
+        self.eq_var = tk.BooleanVar(value=True)
         tk.Checkbutton(row2q, text="EQ bars", variable=self.eq_var,
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        font=FONT).pack(side="left")
@@ -1079,47 +1161,63 @@ class VideoGenTab(tk.Frame):
         run_with_log(self, gen.build_banks, on_done=_done)
 
     def delete_banks(self):
-        """Clear stale shape + layer banks (memory) and drop disk bank files.
-        Next Generate/Build will rebuild from scratch."""
+        """Drop this tab's generator instance and clear its recipe pool.
+        Does NOT touch shared shape/layer .pt files — those are managed
+        by the static Generator tab ('Empty Banks'). Only removes
+        recipes_*.json files, which are video-tab-owned."""
         bank_dir = os.path.join(PROJECT_ROOT, "bank")
         removed = 0
         if os.path.isdir(bank_dir):
             for f in os.listdir(bank_dir):
-                fp = os.path.join(bank_dir, f)
-                if os.path.isfile(fp):
+                if f.startswith("recipes_") and f.endswith(".json"):
                     try:
-                        os.remove(fp)
+                        os.remove(os.path.join(bank_dir, f))
                         removed += 1
                     except OSError:
                         pass
-        if self.gen is not None:
-            self.gen.shape_bank = None
-            self.gen.base_layers = None
-            self.gen.bank_size = 0
-            if hasattr(self.gen, "_recipe_pool"):
-                self.gen._recipe_pool = []
-        self.status.config(text=f"Banks cleared ({removed} files removed)")
+        # Drop the generator instance so next _get_gen() rebuilds fresh; it
+        # will auto-load the shared shapes_*.pt / layers_*.pt from disk.
+        self.gen = None
+        self.status.config(
+            text=f"Video state cleared ({removed} recipe file(s) removed)")
 
     def _get_seq_kwargs(self):
         kw = self._get_seq_kwargs_raw()
-        # "Random mix" drops each enabled overlay/effect with 50% probability
-        # per call so consecutive Generate clicks produce visibly different
-        # compositions instead of "every effect, every time".
+        # "Random mix" drops each enabled overlay/effect with a per-effect
+        # probability. Visually loud/full-screen effects (EQ bars, fire,
+        # starfield, arcade scenes) drop aggressively so they don't
+        # dominate every clip; subtle post-FX (shake, chromatic, grain)
+        # drop lightly so they stay common.
         if getattr(self, "random_mix_var", None) and self.random_mix_var.get():
             import random as _rnd
-            # Flags whose value is user-controllable and should be randomly
-            # dropped. Base motion (physics/rotation/zoom/fade/viewport)
-            # stays on so the scene still animates.
-            rollable = [
-                "use_fluid", "use_ripple", "use_shake", "use_kaleido",
-                "fast_transform", "use_flash", "use_palette_cycle",
-                "use_text", "use_signage", "use_particles",
-                "use_raymarch", "sphere_dip", "use_arcade",
-                "use_glitch", "use_chromatic", "use_scanlines",
-                "use_fire", "use_vortex", "use_starfield", "use_eq",
-            ]
-            for k in rollable:
-                if kw.get(k) and _rnd.random() < 0.5:
+            # drop_prob per flag: higher = rarer. 0.5 = neutral.
+            drops = {
+                # Subtle post — keep common
+                "use_shake":       0.30,
+                "use_chromatic":   0.30,
+                "use_scanlines":   0.35,
+                "use_palette_cycle": 0.40,
+                "fast_transform": 0.40,
+                # Neutral — 50/50
+                "use_fluid":       0.50,
+                "use_ripple":      0.50,
+                "use_kaleido":     0.50,
+                "use_flash":       0.55,
+                "use_glitch":      0.55,
+                "use_particles":   0.55,
+                "use_raymarch":    0.60,
+                "sphere_dip":      0.70,
+                # Loud — make rare
+                "use_text":        0.70,
+                "use_signage":     0.75,
+                "use_fire":        0.80,
+                "use_vortex":      0.80,
+                "use_starfield":   0.80,
+                "use_arcade":      0.80,
+                "use_eq":          0.88,
+            }
+            for k, p in drops.items():
+                if kw.get(k) and _rnd.random() < p:
                     kw[k] = False
         return kw
 
@@ -1198,11 +1296,18 @@ class VideoGenTab(tk.Frame):
         T = self.T_var.get()
         self.status.config(text=f"Building motion pool T={T}...")
         self.update()
-        seq_kw = self._get_seq_kwargs()
+        # CRITICAL: pass RAW kwargs and let build_motion_pool do per-recipe
+        # dropout internally via its own random_mix. Passing _get_seq_kwargs()
+        # here rolls dropout ONCE for the whole pool, so if that single roll
+        # keeps use_eq=True, all 200 recipes get EQ and every training
+        # preview shows bars. The "EQ everywhere" bug.
+        seq_kw = self._get_seq_kwargs_raw()
+        rmix = bool(getattr(self, "random_mix_var", None)
+                    and self.random_mix_var.get())
         def _fn():
             if gen.base_layers is None:
                 gen.build_base_layers()
-            gen.build_motion_pool(n_clips=200, T=T, **seq_kw)
+            gen.build_motion_pool(n_clips=200, T=T, random_mix=rmix, **seq_kw)
         def _done():
             stats = gen.motion_pool_stats()
             self.status.config(text=f"Pool ready: {stats}")
@@ -1325,7 +1430,6 @@ class VideoGenTab(tk.Frame):
         self._video_playing = False
         gen = self._get_gen()
         T = self.T_var.get()
-        seq_kw = self._get_seq_kwargs()
         gen.disco_quadrant = bool(self.disco_var.get())
         self.status.config(text=f"Generating 8 clips T={T}...")
         self.update()
@@ -1333,14 +1437,15 @@ class VideoGenTab(tk.Frame):
         def _gen():
             if gen.base_layers is None:
                 gen.build_base_layers()
-            # Each Phase 1-10 effect samples ONE set of params per
-            # generate_sequence call and applies it across the whole batch,
-            # so calling with B=8 once yields 8 visually-identical clips
-            # whenever any effect is enabled. Call with B=1 eight times so
-            # each slot gets fresh recipe params (and fresh base composite).
+            # Re-roll the random-mix dropout per clip. Calling
+            # _get_seq_kwargs() ONCE and reusing the dict means dropout
+            # fires once and every tile shares the same effect stack
+            # (so if that roll keeps EQ on, all 8 tiles get EQ).
             with torch.no_grad():
-                clip_list = [gen.generate_sequence(1, T=T, **seq_kw)[0]
-                             for _ in range(8)]
+                clip_list = [
+                    gen.generate_sequence(
+                        1, T=T, **self._get_seq_kwargs())[0]
+                    for _ in range(8)]
             clips = torch.stack(clip_list, dim=0)
             H, W = gen.H, gen.W
             sh, sw = H // 2, W // 2
@@ -1410,7 +1515,6 @@ class VideoGenTab(tk.Frame):
         self._video_playing = False
         gen = self._get_gen()
         T = self.T_var.get()
-        seq_kw = self._get_seq_kwargs()
         prev_disco = gen.disco_quadrant
         prev_weights = gen._disco_weights.clone()
         gen.disco_quadrant = True
@@ -1429,7 +1533,10 @@ class VideoGenTab(tk.Frame):
                         w = torch.zeros_like(prev_weights)
                         w[q] = 1.0
                         gen._disco_weights = w
-                        clip_list.append(gen.generate_sequence(1, T=T, **seq_kw)[0])
+                        # Re-roll random-mix dropout per clip so each tile
+                        # gets its own independent effect stack.
+                        clip_list.append(gen.generate_sequence(
+                            1, T=T, **self._get_seq_kwargs())[0])
                 clips = torch.stack(clip_list, dim=0)
                 H, W = gen.H, gen.W
                 sh, sw = H // 2, W // 2

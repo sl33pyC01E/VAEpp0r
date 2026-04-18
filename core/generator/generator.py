@@ -530,78 +530,89 @@ class VAEpp0rGenerator(
         if n0 > 0:
             canvas[q0_mask] = self.pattern_bank.generate(n0)
 
-        # Q1: Pattern + collage + light shapes
+        # Q1: Pattern + collage + light shapes — per-sample collage op
+        # roll so a batch in Q1 doesn't collapse to one op across the
+        # whole subgroup.
         q1_mask = (quadrants == 1)
         n1 = q1_mask.sum().item()
         if n1 > 0:
-            pat_a = self.pattern_bank.generate(n1)
-            pat_b = self.pattern_bank.generate(n1)
-            # Random collage operation
-            op = torch.randint(0, 4, (1,)).item()
-            if op == 0:
-                combined = pattern_collage.rip_collage(pat_a, pat_b)
-            elif op == 1:
-                combined = pattern_collage.alpha_blend(pat_a, pat_b)
-            elif op == 2:
-                combined = pattern_collage.merge_halves(pat_a, pat_b)
-            else:
-                combined = pattern_collage.splice_regions(
-                    [pat_a, pat_b], self.device)
-            combined = self._overlay_shapes_on_canvas(combined, n1, light=True)
-            combined = self._post_process(combined)
-            canvas[q1_mask] = combined.clamp(0, 1)
+            per_sample = []
+            for _ in range(n1):
+                pa = self.pattern_bank.generate(1)
+                pb = self.pattern_bank.generate(1)
+                op = torch.randint(0, 4, (1,)).item()
+                if op == 0:
+                    c = pattern_collage.rip_collage(pa, pb)
+                elif op == 1:
+                    c = pattern_collage.alpha_blend(pa, pb)
+                elif op == 2:
+                    c = pattern_collage.merge_halves(pa, pb)
+                else:
+                    c = pattern_collage.splice_regions(
+                        [pa, pb], self.device)
+                c = self._overlay_shapes_on_canvas(c, 1, light=True)
+                c = self._post_process(c)
+                per_sample.append(c.clamp(0, 1))
+            canvas[q1_mask] = torch.cat(per_sample, dim=0)
 
         # Q2: Dense random — existing pipeline with cranked micro-stamps
         q2_mask = (quadrants == 2)
         n2 = q2_mask.sum().item()
         if n2 > 0:
-            # Run existing compositing pipeline
-            bg = self._sample_colors(n2)
-            c2 = bg.view(n2, 3, 1, 1).expand(n2, 3, H, W).clone()
-            template = self._pick_template()
-            if template != "random":
-                c2 = self._apply_scene_template(c2, template, n2)
-            # Dense layers
-            n_layers = torch.randint(5, 10, (n2,), device=self.device)
-            for li in range(n_layers.max().item()):
-                active = (li < n_layers).float().view(n2, 1, 1, 1)
-                layer_idx = torch.randint(0, self.base_layers.shape[0],
-                                           (n2,), device=self.device)
-                layer = self.base_layers[layer_idx].clone()
-                shift = (torch.rand(n2, 3, 1, 1, device=self.device) - 0.5) * 0.3
-                layer = (layer + shift).clamp(0, 1)
-                opacity = torch.rand(n2, 1, 1, 1, device=self.device) * 0.6 + 0.2
-                alpha = active * opacity
-                c2 = c2 * (1 - alpha) + layer * alpha
-            # Dense overlay: many stamps + many micro-stamps
-            c2 = self._overlay_shapes_on_canvas(c2, n2,
-                                                 n_stamps_range=(5, 15),
-                                                 n_micro_range=(200, 500))
-            # Fractal layout
-            if torch.rand(1).item() < 0.5 and self.shape_bank is not None:
-                c2 = self._render_fractal_layout(c2, n_shapes=15)
-            c2 = self._post_process(c2)
-            canvas[q2_mask] = c2.clamp(0, 1)
+            # Per-sample render so each Q2 sample gets its own template,
+            # collage op, and fractal-layout roll. The old batched path
+            # picked one template for all n2 samples and one fractal gate
+            # for all n2, producing visible duplicates in previews.
+            per_sample = []
+            for _ in range(n2):
+                bg = self._sample_colors(1)
+                c = bg.view(1, 3, 1, 1).expand(1, 3, H, W).clone()
+                template = self._pick_template()
+                if template != "random":
+                    c = self._apply_scene_template(c, template, 1)
+                # Dense layers for this one sample
+                nl = torch.randint(5, 10, (1,), device=self.device)
+                for li in range(nl.item()):
+                    lidx = torch.randint(0, self.base_layers.shape[0],
+                                          (1,), device=self.device)
+                    layer = self.base_layers[lidx].clone()
+                    shift = (torch.rand(1, 3, 1, 1, device=self.device)
+                             - 0.5) * 0.3
+                    layer = (layer + shift).clamp(0, 1)
+                    opacity = torch.rand(1, 1, 1, 1,
+                                          device=self.device) * 0.6 + 0.2
+                    c = c * (1 - opacity) + layer * opacity
+                c = self._overlay_shapes_on_canvas(c, 1,
+                                                    n_stamps_range=(5, 15),
+                                                    n_micro_range=(200, 500))
+                if torch.rand(1).item() < 0.5 \
+                        and self.shape_bank is not None:
+                    c = self._render_fractal_layout(c, n_shapes=15)
+                c = self._post_process(c)
+                per_sample.append(c.clamp(0, 1))
+            canvas[q2_mask] = torch.cat(per_sample, dim=0)
 
-        # Q3: Structured scenes — existing template pipeline
+        # Q3: Structured scenes — per-sample template roll so a batch
+        # landing in Q3 doesn't show N identical tetris/arcade panels.
         q3_mask = (quadrants == 3)
         n3 = q3_mask.sum().item()
         if n3 > 0:
-            # Force a structured template
-            # Use local probs to avoid mutating shared state
             q3_probs = self.template_probs.clone()
-            q3_probs[0] = 0
+            q3_probs[0] = 0  # forbid "random"
             q3_probs = q3_probs / (q3_probs.sum() + 1e-8)
-            idx = torch.multinomial(q3_probs, 1).item()
-            template = self.template_names[idx]
-            bg = self._sample_colors(n3)
-            c3 = bg.view(n3, 3, 1, 1).expand(n3, 3, H, W).clone()
-            c3 = self._apply_scene_template(c3, template, n3)
-            c3 = self._overlay_shapes_on_canvas(c3, n3,
-                                                 n_stamps_range=(2, 6),
-                                                 n_micro_range=(10, 30))
-            c3 = self._post_process(c3)
-            canvas[q3_mask] = c3.clamp(0, 1)
+            per_sample = []
+            for _ in range(n3):
+                idx = torch.multinomial(q3_probs, 1).item()
+                template = self.template_names[idx]
+                bg = self._sample_colors(1)
+                c = bg.view(1, 3, 1, 1).expand(1, 3, H, W).clone()
+                c = self._apply_scene_template(c, template, 1)
+                c = self._overlay_shapes_on_canvas(c, 1,
+                                                    n_stamps_range=(2, 6),
+                                                    n_micro_range=(10, 30))
+                c = self._post_process(c)
+                per_sample.append(c.clamp(0, 1))
+            canvas[q3_mask] = torch.cat(per_sample, dim=0)
 
         # Q4-Q7: For each new class, build a MINIMAL base so the signature
         # effect dominates. Full-noise base drowns signage/raymarch/arcade

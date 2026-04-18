@@ -92,6 +92,23 @@ class FlattenTab(tk.Frame):
         f, self.preview_every = make_spin(row4, "Preview every", default=200)
         f.pack(side="left")
 
+        # Preview reference image
+        pimg_row = tk.Frame(top, bg=BG_PANEL)
+        pimg_row.pack(fill="x", pady=(5, 0))
+        tk.Label(pimg_row, text="Preview image (optional):",
+                 bg=BG_PANEL, fg=FG_DIM, font=FONT_SMALL).pack(
+                     side="left", padx=(0, 4))
+        self.preview_img_var = tk.StringVar(value="")
+        tk.Entry(pimg_row, textvariable=self.preview_img_var,
+                 bg=BG_INPUT, fg=FG, insertbackground=FG,
+                 font=FONT_SMALL, width=55).pack(
+                     side="left", fill="x", expand=True, padx=(0, 4))
+        make_btn(pimg_row, "Browse", self._pick_preview_img, BLUE, 8).pack(
+            side="left", padx=(0, 4))
+        make_btn(pimg_row, "Clear",
+                 lambda: self.preview_img_var.set(""), RED, 6).pack(
+                     side="left")
+
         row5 = tk.Frame(top, bg=BG_PANEL)
         row5.pack(fill="x", pady=(5, 0))
         self.fresh_opt_var = tk.BooleanVar(value=False)
@@ -145,7 +162,19 @@ class FlattenTab(tk.Frame):
             cmd.append("--fresh-opt")
         if self.disco_var.get():
             cmd.append("--disco")
+        pimg = self.preview_img_var.get().strip()
+        if pimg:
+            cmd += ["--preview-image", pimg]
         self.runner.run(cmd, cwd=PROJECT_ROOT)
+
+    def _pick_preview_img(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select preview reference image",
+            filetypes=[("Image", "*.png *.jpg *.jpeg *.bmp *.webp"),
+                       ("All", "*.*")])
+        if path:
+            self.preview_img_var.set(path)
 
     def stop(self):
         logdir = os.path.join(PROJECT_ROOT, "flatten_logs")
@@ -304,20 +333,27 @@ class FlattenInferenceTab(tk.Frame):
             bn_cfg = bn_ckpt.get("config", {})
             bn_ch = bn_cfg.get("bottleneck_channels", 6)
             walk = bn_cfg.get("walk_order", "raster")
+            bn_H = int(bn_cfg.get("spatial_h", lat_H))
+            bn_W = int(bn_cfg.get("spatial_w", lat_W))
+            bn_latC = int(bn_cfg.get("latent_channels", lat_C))
 
             self.bottleneck = FlattenDeflatten(
-                latent_channels=lat_C, bottleneck_channels=bn_ch,
-                spatial_h=lat_H, spatial_w=lat_W, walk_order=walk,
+                latent_channels=bn_latC, bottleneck_channels=bn_ch,
+                spatial_h=bn_H, spatial_w=bn_W, walk_order=walk,
             ).cuda()
             self.bottleneck.load_state_dict(bn_ckpt["bottleneck"])
             self.bottleneck.eval()
 
             self._image_channels = ch
             step = bn_ckpt.get("step", "?")
+            shape_warn = ""
+            if (bn_H, bn_W) != (lat_H, lat_W):
+                shape_warn = (f"  [WARN: bn grid {bn_H}x{bn_W} != "
+                              f"VAE probe {lat_H}x{lat_W} — using bn's]")
             self.status.config(
                 text=f"VAE: {ch}ch lat={lat} | Bottleneck: {bn_ch}ch "
-                     f"({lat_C}→{bn_ch}→{lat_C}), step {step}, "
-                     f"walk={walk}")
+                     f"({bn_latC}→{bn_ch}→{bn_latC}) @ {bn_H}x{bn_W}, "
+                     f"step {step}, walk={walk}{shape_warn}")
         except Exception as e:
             self.status.config(text=f"Error: {e}")
 
@@ -353,7 +389,7 @@ class FlattenInferenceTab(tk.Frame):
                 self.after(0, lambda: self.status.config(
                     text="GT | VAE | Flatten (synthetic)"))
             except Exception as e:
-                self.after(0, lambda: self.status.config(text=f"Error: {e}"))
+                self.after(0, lambda e=e: self.status.config(text=f"Error: {e}"))
 
         threading.Thread(target=_bg, daemon=True).start()
 
@@ -403,7 +439,7 @@ class FlattenInferenceTab(tk.Frame):
                 self.after(0, lambda: self.status.config(
                     text=f"GT | VAE | Flatten — {basename}"))
             except Exception as e:
-                self.after(0, lambda: self.status.config(text=f"Error: {e}"))
+                self.after(0, lambda e=e: self.status.config(text=f"Error: {e}"))
 
         threading.Thread(target=_bg, daemon=True).start()
 
@@ -831,19 +867,31 @@ class FlattenVideoInferenceTab(tk.Frame):
             bn_cfg = bn_ckpt_data.get("config", {})
             bn_ch  = bn_cfg.get("bottleneck_channels", 6)
             walk   = bn_cfg.get("walk_order", "raster")
+            # Prefer checkpoint's saved spatial_h/_w (exact training-time grid)
+            # over re-probing the VAE. The probe can disagree if the VAE is
+            # rebuilt with a different spatial-downscale schedule or if the
+            # config on the VAE ckpt disagrees with what was actually trained.
+            bn_H = int(bn_cfg.get("spatial_h", lat_H))
+            bn_W = int(bn_cfg.get("spatial_w", lat_W))
+            bn_latC = int(bn_cfg.get("latent_channels", lat_C))
 
             self.bottleneck = FlattenDeflatten(
-                latent_channels=lat_C, bottleneck_channels=bn_ch,
-                spatial_h=lat_H, spatial_w=lat_W, walk_order=walk,
+                latent_channels=bn_latC, bottleneck_channels=bn_ch,
+                spatial_h=bn_H, spatial_w=bn_W, walk_order=walk,
             ).cuda()
             self.bottleneck.load_state_dict(bn_ckpt_data["bottleneck"])
             self.bottleneck.eval()
 
             step = bn_ckpt_data.get("step", "?")
             src = "combined" if combined else "separate"
+            shape_warn = ""
+            if (bn_H, bn_W) != (lat_H, lat_W):
+                shape_warn = (f"  [WARN: bn grid {bn_H}x{bn_W} != "
+                              f"VAE probe {lat_H}x{lat_W} — using bn's]")
             self.status.config(
                 text=f"VAE+BN ({src}): {ch}ch lat={lat} | "
-                     f"{bn_ch}ch bottleneck, step {step}, walk={walk}, {loaded} VAE weights")
+                     f"{bn_ch}ch bottleneck @ {bn_H}x{bn_W}, step {step}, "
+                     f"walk={walk}, {loaded} VAE weights{shape_warn}")
         except Exception as e:
             self.status.config(text=f"Error: {e}")
 
@@ -885,7 +933,7 @@ class FlattenVideoInferenceTab(tk.Frame):
                          f"Output T''={T_vae}, showing {T_show} frames"))
                 self.after(0, self._show_video, gt, rc_vae, rc_flat, T_show)
             except Exception as e:
-                self.after(0, lambda: self.status.config(text=f"Error: {e}"))
+                self.after(0, lambda e=e: self.status.config(text=f"Error: {e}"))
 
         threading.Thread(target=_bg, daemon=True).start()
 
@@ -950,7 +998,7 @@ class FlattenVideoInferenceTab(tk.Frame):
                          f"showing {T_show} frames"))
                 self.after(0, self._show_video, gt, rc_vae, rc_flat, T_show)
             except Exception as e:
-                self.after(0, lambda: self.status.config(text=f"Error: {e}"))
+                self.after(0, lambda e=e: self.status.config(text=f"Error: {e}"))
 
         threading.Thread(target=_bg, daemon=True).start()
 

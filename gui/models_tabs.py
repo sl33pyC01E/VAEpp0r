@@ -167,6 +167,11 @@ class TrainingTab(tk.Frame):
         ef.pack(fill="x")
         f.pack(side="left", fill="x", expand=True)
 
+        # Overfit-on-video toggle (bypasses the generator)
+        ov_row, self.overfit_var, self.overfit_vid_var, self.overfit_skip_var = \
+            make_overfit_row(top)
+        ov_row.pack(fill="x", pady=(5, 0))
+
         btn_row = tk.Frame(top, bg=BG_PANEL)
         btn_row.pack(fill="x", pady=(10, 0))
         make_btn(btn_row, "Train", self.start, GREEN).pack(side="left", padx=(0, 5))
@@ -287,6 +292,12 @@ class TrainingTab(tk.Frame):
         prev_img = self.preview_img_var.get().strip()
         if prev_img:
             cmd += ["--preview-image", prev_img]
+        if hasattr(self, 'overfit_var'):
+            ov_path = self.overfit_vid_var.get().strip()
+            if self.overfit_var.get() and ov_path:
+                cmd += ["--overfit-video", ov_path,
+                        "--overfit-frame-skip",
+                        str(self.overfit_skip_var.get())]
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop_save(self):
@@ -706,9 +717,13 @@ class ConvertTab(tk.Frame):
         arch3d_row.pack(fill="x", pady=(5, 0))
         f, self.latent3d_var = make_spin(arch3d_row, "Latent ch", default=16)
         f.pack(side="left", padx=(0, 10))
-        f, self.base_ch_var = make_spin(arch3d_row, "Base ch", default=48)
+        # Enc ch (shallow->deep) and Dec ch (deep->shallow). Dec[0] must
+        # equal Enc[-1] (bottleneck), same convention as VideoTrainTab.
+        f, self.enc_ch_var = make_float(arch3d_row, "Enc ch",
+                                        "48,96,192", width=16)
         f.pack(side="left", padx=(0, 10))
-        f, self.ch_mult_var = make_float(arch3d_row, "Ch mult", "1,2,4", width=12)
+        f, self.dec_ch_var = make_float(arch3d_row, "Dec ch",
+                                        "192,96,48", width=16)
         f.pack(side="left", padx=(0, 10))
         f, self.num_res_var = make_spin(arch3d_row, "Res blocks", default=2)
         f.pack(side="left")
@@ -722,6 +737,32 @@ class ConvertTab(tk.Frame):
                                           "true,true,false", width=22)
         f.pack(side="left", padx=(0, 10))
 
+        # Arch extras (matches VideoTrain3DTab)
+        ex3d_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
+        ex3d_row.pack(fill="x", pady=(5, 0))
+        self.use_attention3d_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(ex3d_row, text="Attention",
+                       variable=self.use_attention3d_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       activeforeground=FG, font=FONT_SMALL).pack(
+                           side="left", padx=(0, 10))
+        self.use_groupnorm3d_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(ex3d_row, text="GroupNorm",
+                       variable=self.use_groupnorm3d_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       activeforeground=FG, font=FONT_SMALL).pack(
+                           side="left", padx=(0, 10))
+        self.residual_shortcut3d_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(ex3d_row, text="Residual shortcut (DC-AE)",
+                       variable=self.residual_shortcut3d_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       activeforeground=FG, font=FONT_SMALL).pack(
+                           side="left", padx=(0, 10))
+        f, self.attn_heads3d_var = make_spin(ex3d_row, "attn heads", default=8)
+        f.pack(side="left", padx=(0, 10))
+        f, self.gn_groups3d_var = make_spin(ex3d_row, "GN groups", default=1)
+        f.pack(side="left")
+
         fs3d_row = tk.Frame(self._3d_frame, bg=BG_PANEL)
         fs3d_row.pack(fill="x", pady=(5, 0))
         f, self.haar3d_var = make_spin(fs3d_row, "Haar levels", default=1)
@@ -731,6 +772,11 @@ class ConvertTab(tk.Frame):
                        bg=BG_PANEL, fg=FG, selectcolor=BG_INPUT,
                        activebackground=BG_PANEL, activeforeground=FG,
                        font=FONT_SMALL).pack(side="left", padx=(0, 10))
+        f, self.fsq_levels3d_var = make_float(fs3d_row, "FSQ levels",
+                                              "8,8,8,5,5,5", width=14)
+        f.pack(side="left", padx=(0, 10))
+        f, self.fsq_stages3d_var = make_spin(fs3d_row, "FSQ stages", default=4)
+        f.pack(side="left")
 
         btn_row = tk.Frame(top, bg=BG_PANEL)
         btn_row.pack(fill="x", pady=(10, 0))
@@ -785,13 +831,20 @@ class ConvertTab(tk.Frame):
                     PROJECT_ROOT, "synthyper_video_logs", "converted.pt"))
 
     def _apply_preset_3d(self, event=None):
-        """Populate 3D fields from selected preset."""
+        """Populate 3D fields from selected preset. Presets still use the
+        legacy base_ch+ch_mult schema (per user request); translate into
+        Enc ch / Dec ch strings here: enc = base*mult shallow->deep,
+        dec = reversed(enc) deep->shallow."""
         name = self.preset3d_var.get()
         preset = self._3d_presets.get(name)
         if preset:
             self.latent3d_var.set(preset["latent_ch"])
-            self.base_ch_var.set(preset["base_ch"])
-            self.ch_mult_var.set(preset["ch_mult"])
+            base = int(preset["base_ch"])
+            mult = [int(x.strip()) for x in str(preset["ch_mult"]).split(",")]
+            enc = [base * m for m in mult]
+            dec = list(reversed(enc))
+            self.enc_ch_var.set(",".join(str(c) for c in enc))
+            self.dec_ch_var.set(",".join(str(c) for c in dec))
             self.num_res_var.set(preset["num_res_blocks"])
             self.t_down3d_var.set(preset["temporal_down"])
             self.s_down3d_var.set(preset["spatial_down"])
@@ -799,9 +852,13 @@ class ConvertTab(tk.Frame):
             self.fsq3d_var.set(preset["fsq"])
         self._update_dim_info_3d()
         if not getattr(self, "_dim_trace_wired", False):
-            for v in (self.latent3d_var, self.base_ch_var, self.ch_mult_var,
+            for v in (self.latent3d_var, self.enc_ch_var, self.dec_ch_var,
                       self.num_res_var, self.haar3d_var,
-                      self.t_down3d_var, self.s_down3d_var, self.fsq3d_var):
+                      self.t_down3d_var, self.s_down3d_var, self.fsq3d_var,
+                      self.fsq_levels3d_var, self.fsq_stages3d_var,
+                      self.use_attention3d_var, self.use_groupnorm3d_var,
+                      self.residual_shortcut3d_var,
+                      self.attn_heads3d_var, self.gn_groups3d_var):
                 try:
                     v.trace_add("write", lambda *a: self._update_dim_info_3d())
                 except Exception:
@@ -820,7 +877,8 @@ class ConvertTab(tk.Frame):
     def _do_update_dim_info_3d(self):
         self._dim_job = None
         try:
-            ch_mult = tuple(int(x) for x in self.ch_mult_var.get().split(","))
+            enc_ch = tuple(int(x) for x in self.enc_ch_var.get().split(","))
+            dec_ch = tuple(int(x) for x in self.dec_ch_var.get().split(","))
             t_down = tuple(x.strip().lower() in ("true", "1", "yes")
                            for x in self.t_down3d_var.get().split(","))
             s_down = tuple(x.strip().lower() in ("true", "1", "yes")
@@ -829,15 +887,40 @@ class ConvertTab(tk.Frame):
             t_dn = (2 ** sum(t_down)) * (2 ** haar)
             s_dn = (2 ** sum(s_down)) * (2 ** haar)
             fsq = bool(self.fsq3d_var.get())
+            try:
+                fsq_levels = tuple(int(x) for x in
+                                   self.fsq_levels3d_var.get().split(","))
+                fsq_stages = int(self.fsq_stages3d_var.get())
+            except Exception:
+                fsq_levels, fsq_stages = (8, 8, 8, 5, 5, 5), 4
             latent_ch = int(self.latent3d_var.get())
             d = self._estimate_dims(
-                latent_ch, s_dn, t_dn, fsq=fsq, H=360, W=640)
+                latent_ch, s_dn, t_dn,
+                fsq=fsq, fsq_levels=fsq_levels, fsq_stages=fsq_stages,
+                H=360, W=640)
             params = 0
-            if len(t_down) == len(ch_mult) and len(s_down) == len(ch_mult):
+            if (len(enc_ch) == len(dec_ch) == len(t_down) == len(s_down)
+                    and enc_ch[-1] == dec_ch[0]):
+                # Read extras; fall back to defaults while user is mid-edit.
+                try:
+                    _use_attn = bool(self.use_attention3d_var.get())
+                    _use_gn = bool(self.use_groupnorm3d_var.get())
+                    _res_sc = bool(self.residual_shortcut3d_var.get())
+                    _attn_h = int(self.attn_heads3d_var.get())
+                    _gn_g = int(self.gn_groups3d_var.get())
+                except Exception:
+                    _use_attn = True; _use_gn = True; _res_sc = False
+                    _attn_h = 8; _gn_g = 1
                 params = self._estimate_params(
-                    latent_ch, int(self.base_ch_var.get()), ch_mult,
-                    int(self.num_res_var.get()),
-                    t_down, s_down, haar, fsq)
+                    latent_ch=latent_ch,
+                    enc_channels=enc_ch, dec_channels=dec_ch,
+                    num_res_blocks=int(self.num_res_var.get()),
+                    temporal_down=t_down, spatial_down=s_down,
+                    haar_levels=haar, fsq=fsq,
+                    fsq_levels=fsq_levels, fsq_stages=fsq_stages,
+                    use_attention=_use_attn, use_groupnorm=_use_gn,
+                    residual_shortcut=_res_sc,
+                    attn_heads=_attn_h, gn_groups=_gn_g)
             p_str = f"Params: {params/1e6:.1f}M  |  " if params else ""
             self.dim_info_var.set(p_str + d["label"])
         except Exception as e:
@@ -1037,9 +1120,9 @@ class ConvertTab(tk.Frame):
 
         # -- Parse 3D target config from UI --
         latent_ch = int(self.latent3d_var.get())
-        base_ch = int(self.base_ch_var.get())
         try:
-            ch_mult = tuple(int(x) for x in self.ch_mult_var.get().split(","))
+            enc_channels = tuple(int(x) for x in self.enc_ch_var.get().split(","))
+            dec_channels = tuple(int(x) for x in self.dec_ch_var.get().split(","))
             t_down = tuple(x.strip().lower() in ("true", "1", "yes")
                            for x in self.t_down3d_var.get().split(","))
             s_down = tuple(x.strip().lower() in ("true", "1", "yes")
@@ -1050,20 +1133,71 @@ class ConvertTab(tk.Frame):
         num_res = int(self.num_res_var.get())
         haar_lv = int(self.haar3d_var.get())
         fsq = bool(self.fsq3d_var.get())
+        try:
+            fsq_levels = tuple(int(x) for x in
+                               self.fsq_levels3d_var.get().split(","))
+        except Exception as e:
+            self._log(f"Bad FSQ levels: {e}")
+            return
+        fsq_stages = int(self.fsq_stages3d_var.get())
+        # Arch extras. Prefer UI values, but fall back to source config
+        # if the checkbox was left at its default and the source explicitly
+        # sets it — this lets "Convert" auto-pick up residual_shortcut /
+        # use_attention / use_groupnorm from the 2D checkpoint without the
+        # user having to toggle anything.
+        use_attention = bool(self.use_attention3d_var.get())
+        use_groupnorm = bool(self.use_groupnorm3d_var.get())
+        residual_shortcut = bool(self.residual_shortcut3d_var.get())
+        attn_heads = int(self.attn_heads3d_var.get())
+        gn_groups = int(self.gn_groups3d_var.get())
+        # Surface if the 2D source had attrs the user left default-off:
+        src_extras = {
+            "residual_shortcut": bool(src_config.get("residual_shortcut", False)),
+            "use_attention": bool(src_config.get("use_attention", False)),
+            "use_groupnorm": bool(src_config.get("use_groupnorm", False)),
+        }
+        # If source has residual_shortcut=True and the user didn't check
+        # the box, warn — they probably want it on.
+        if src_extras["residual_shortcut"] and not residual_shortcut:
+            self._log("  NOTE: source has residual_shortcut=True. Enabling "
+                      "on target too (uncheck 'Residual shortcut (DC-AE)' "
+                      "and re-convert to disable).")
+            residual_shortcut = True
+
+        if len(enc_channels) != len(dec_channels):
+            self._log(f"len(Enc ch)={len(enc_channels)} must equal "
+                      f"len(Dec ch)={len(dec_channels)}.")
+            return
+        if enc_channels[-1] != dec_channels[0]:
+            self._log(f"Bottleneck mismatch: Enc[-1]={enc_channels[-1]} "
+                      f"must equal Dec[0]={dec_channels[0]}.")
+            return
 
         self._log(f"\nBuilding MiniVAE3D:")
-        self._log(f"  latent_ch={latent_ch}  base_ch={base_ch}  ch_mult={ch_mult}")
+        self._log(f"  latent_ch={latent_ch}")
+        self._log(f"  enc_channels={enc_channels}  dec_channels={dec_channels}")
         self._log(f"  temporal_down={t_down}  spatial_down={s_down}")
-        self._log(f"  haar_levels={haar_lv}  fsq={fsq}  res_blocks={num_res}")
+        self._log(f"  haar_levels={haar_lv}  res_blocks={num_res}")
+        self._log(f"  fsq={fsq}"
+                  f"{f'  levels={fsq_levels}  stages={fsq_stages}' if fsq else ''}")
+        self._log(f"  use_attention={use_attention}  attn_heads={attn_heads}")
+        self._log(f"  use_groupnorm={use_groupnorm}  gn_groups={gn_groups}")
+        self._log(f"  residual_shortcut={residual_shortcut}  (DC-AE, spatial-only)")
+        self._log(f"  source extras: {src_extras}")
 
         try:
             model = MiniVAE3D(
                 latent_channels=latent_ch,
                 image_channels=3, output_channels=3,
-                base_channels=base_ch, channel_mult=ch_mult,
+                enc_channels=enc_channels, dec_channels=dec_channels,
                 num_res_blocks=num_res,
                 temporal_downsample=t_down, spatial_downsample=s_down,
-                attn_at_deepest=True, haar_levels=haar_lv, fsq=fsq,
+                use_attention=use_attention,
+                use_groupnorm=use_groupnorm,
+                residual_shortcut=residual_shortcut,
+                attn_heads=attn_heads, gn_groups=gn_groups,
+                haar_levels=haar_lv, fsq=fsq,
+                fsq_levels=fsq_levels, fsq_stages=fsq_stages,
             )
         except Exception as e:
             self._log(f"  Error building model: {e}")
@@ -1118,13 +1252,30 @@ class ConvertTab(tk.Frame):
                 "latent_channels": latent_ch,
                 "image_channels": 3,
                 "output_channels": 3,
-                "base_channels": base_ch,
-                "channel_mult": ",".join(str(x) for x in ch_mult),
+                # New explicit schema — preferred by readers.
+                "encoder_channels": ",".join(str(x) for x in enc_channels),
+                "decoder_channels": ",".join(str(x) for x in dec_channels),
+                # Legacy keys retained only when the enc schedule is a clean
+                # base*mult; otherwise base_channels=enc[0] and channel_mult
+                # encodes the enc widths directly (asymmetric models won't
+                # round-trip through the legacy loader).
+                "base_channels": int(enc_channels[0]),
+                "channel_mult": ",".join(
+                    str(c // enc_channels[0]) for c in enc_channels)
+                    if all(c % enc_channels[0] == 0 for c in enc_channels)
+                    else ",".join(str(c) for c in enc_channels),
                 "num_res_blocks": num_res,
                 "temporal_downsample": ",".join(str(s).lower() for s in t_down),
                 "spatial_downsample":  ",".join(str(s).lower() for s in s_down),
                 "haar_levels": haar_lv,
                 "fsq": fsq,
+                "fsq_levels": ",".join(str(x) for x in fsq_levels),
+                "fsq_stages": fsq_stages,
+                "use_attention": bool(use_attention),
+                "use_groupnorm": bool(use_groupnorm),
+                "residual_shortcut": bool(residual_shortcut),
+                "attn_heads": int(attn_heads),
+                "gn_groups": int(gn_groups),
                 "temporal": True,
                 "synthyper_stage": 2,
                 "converted_from": src,
@@ -1137,7 +1288,10 @@ class ConvertTab(tk.Frame):
         self._log("Done. Use this as --resume for Video Training 3D.")
 
     def _verify(self):
-        """Verify a converted checkpoint loads correctly."""
+        """Verify a converted checkpoint loads correctly. Dispatches on
+        config['model_class'] since a MiniVAE3D checkpoint uses a
+        different constructor and different state-dict key names than
+        the 2D MiniVAE."""
         self.log.delete("1.0", tk.END)
         dst = self.dst_var.get().strip()
         if not dst or not os.path.exists(dst):
@@ -1153,73 +1307,182 @@ class ConvertTab(tk.Frame):
             self._log(f"  Config: {config}")
 
             sd = ckpt["model"]
-            # Check key shapes
-            checks = [
-                ("encoder.0.weight", None),
-                ("encoder.17.weight", None),
-                ("decoder.1.weight", None),
-                ("decoder.22.weight", None),
-            ]
-            self._log("\nKey shapes:")
-            for k, _ in checks:
-                if k in sd:
-                    self._log(f"  {k}: {list(sd[k].shape)}")
-                else:
-                    self._log(f"  {k}: MISSING")
-
-            # Test forward pass
-            self._log("\nTest forward pass...")
+            model_class = config.get("model_class", "MiniVAE")
             sys.path.insert(0, PROJECT_ROOT)
-            from core.model import MiniVAE
-            lat = config.get("latent_channels", 32)
-            enc_ch, dec_ch = parse_arch_config(config)
-            n_stages = len(dec_ch)
-            enc_t_cfg = config.get("encoder_time_downscale", None)
-            dec_t_cfg = config.get("decoder_time_upscale", None)
-            try:
-                enc_t_str = str(enc_t_cfg) if enc_t_cfg is not None else self.enc_t_var.get()
-                dec_t_str = str(dec_t_cfg) if dec_t_cfg is not None else self.dec_t_var.get()
-                enc_t = tuple(bool(int(x)) for x in enc_t_str.split(","))
-                dec_t = tuple(bool(int(x)) for x in dec_t_str.split(","))
-            except Exception:
-                self._log("Bad enc/dec time pattern in config or UI fields")
-                return
-            haar_mode = config.get("haar", "none")
-            if haar_mode is True: haar_mode = "2x"
-            elif not haar_mode or haar_mode is False: haar_mode = "none"
-            haar_rounds = {"none": 0, "2x": 1, "4x": 2}.get(haar_mode, 0)
-            base_ch = config.get("image_channels", 3)
-            if base_ch == 3 and haar_rounds > 0:
-                vae_ch = 3 * (4 ** haar_rounds)
-            else:
-                vae_ch = base_ch
-            enc_spatial, dec_spatial = _parse_spatial_config(config, n_stages)
-            model = MiniVAE(
-                latent_channels=lat, image_channels=vae_ch, output_channels=vae_ch,
-                encoder_channels=enc_ch, decoder_channels=dec_ch,
-                encoder_time_downscale=enc_t,
-                decoder_time_upscale=dec_t,
-                encoder_spatial_downscale=enc_spatial,
-                decoder_spatial_upscale=dec_spatial,
-                residual_shortcut=config.get("residual_shortcut", False),
-                use_attention=config.get("use_attention", False),
-                use_groupnorm=config.get("use_groupnorm", False),
-            )
-            model.load_state_dict(sd, strict=True)
-            model.eval()
 
-            x = torch.randn(1, 8, vae_ch, 64, 64)
-            with torch.no_grad():
-                recon, latent = model(x)
-            self._log(f"  Input:  {list(x.shape)}")
-            self._log(f"  Latent: {list(latent.shape)}")
-            self._log(f"  Recon:  {list(recon.shape)}")
-            self._log("\nVerification PASSED")
+            if model_class == "MiniVAE3D":
+                self._verify_3d(sd, config)
+            else:
+                self._verify_2d(sd, config)
 
         except Exception as e:
             import traceback
             self._log(f"  Error: {e}")
             traceback.print_exc()
+
+    def _verify_3d(self, sd, config):
+        """Verify a MiniVAE3D checkpoint."""
+        from core.model import MiniVAE3D
+
+        # Probe keys relevant to MiniVAE3D. CausalConv3d wraps nn.Conv3d as
+        # .conv, FactorizedResBlock uses conv1_spatial / conv1_temporal etc.
+        probe_keys = [
+            "encoder.0.conv.weight",                    # first factorized conv
+            "encoder.2.conv1_spatial.conv.weight",      # first res block spatial
+            "encoder.2.conv1_temporal.conv.weight",     # first res block temporal
+            "decoder.0.conv.weight",                    # decoder input conv
+            "decoder.2.conv1_spatial.conv.weight",      # decoder first res block
+        ]
+        self._log("\nKey shapes (MiniVAE3D):")
+        found_any = False
+        for k in probe_keys:
+            if k in sd:
+                self._log(f"  {k}: {list(sd[k].shape)}")
+                found_any = True
+        if not found_any:
+            self._log("  (no known MiniVAE3D keys found; dumping first 4)")
+            for k in list(sd.keys())[:4]:
+                self._log(f"  {k}: {list(sd[k].shape)}")
+        self._log(f"  total state_dict entries: {len(sd)}")
+
+        # Resolve channel schedule: prefer encoder_channels/decoder_channels,
+        # fall back to base_channels+channel_mult.
+        enc_cfg = config.get("encoder_channels")
+        dec_cfg = config.get("decoder_channels")
+        if enc_cfg and dec_cfg:
+            enc_channels = tuple(int(x) for x in str(enc_cfg).split(","))
+            dec_channels = tuple(int(x) for x in str(dec_cfg).split(","))
+        else:
+            base_ch = int(config.get("base_channels", 64))
+            ch_mult = tuple(int(x) for x in
+                            str(config.get("channel_mult", "1,2,4,4")).split(","))
+            enc_channels = tuple(base_ch * m for m in ch_mult)
+            dec_channels = tuple(reversed(enc_channels))
+
+        def _parse_bool_list(v, default):
+            s = str(v if v is not None else default)
+            return tuple(x.strip().lower() in ("true", "1", "yes")
+                         for x in s.split(","))
+
+        temporal_down = _parse_bool_list(
+            config.get("temporal_downsample"),
+            ",".join(["true"] * len(enc_channels)))
+        spatial_down = _parse_bool_list(
+            config.get("spatial_downsample"),
+            ",".join(["true"] * len(enc_channels)))
+
+        fsq = bool(config.get("fsq", False))
+        fsq_levels = tuple(int(x) for x in
+                           str(config.get("fsq_levels", "8,8,8,5,5,5")).split(","))
+        fsq_stages = int(config.get("fsq_stages", 4))
+
+        self._log("\nTest forward pass (MiniVAE3D)...")
+        # Pull arch extras from the config if present, else use defaults
+        # that match MiniVAE3D's own defaults.
+        model = MiniVAE3D(
+            latent_channels=int(config.get("latent_channels", 16)),
+            image_channels=int(config.get("image_channels", 3)),
+            output_channels=int(config.get("output_channels", 3)),
+            enc_channels=enc_channels, dec_channels=dec_channels,
+            num_res_blocks=int(config.get("num_res_blocks", 2)),
+            temporal_downsample=temporal_down,
+            spatial_downsample=spatial_down,
+            haar_levels=int(config.get("haar_levels", 0)),
+            fsq=fsq, fsq_levels=fsq_levels, fsq_stages=fsq_stages,
+            use_attention=bool(config.get("use_attention", True)),
+            use_groupnorm=bool(config.get("use_groupnorm", True)),
+            residual_shortcut=bool(config.get("residual_shortcut", False)),
+            attn_heads=int(config.get("attn_heads", 8)),
+            gn_groups=int(config.get("gn_groups", 1)),
+        )
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        if missing:
+            self._log(f"  missing keys: {len(missing)} "
+                      f"(first: {missing[:3]})")
+        if unexpected:
+            self._log(f"  unexpected keys: {len(unexpected)} "
+                      f"(first: {unexpected[:3]})")
+        model.eval()
+
+        # Use a T that's 1 + t_downscale so we have an anchor + 1 chunk.
+        T = 1 + model.t_downscale
+        x = torch.randn(1, T, 3, 64, 64)
+        with torch.no_grad():
+            recon, latent = model(x)
+        self._log(f"  Input:  {list(x.shape)}")
+        self._log(f"  Latent: {list(latent.shape)}")
+        self._log(f"  Recon:  {list(recon.shape)}")
+        pc = model.param_count()
+        self._log(f"  params: {pc['total']:,} "
+                  f"(enc {pc['encoder']:,} + dec {pc['decoder']:,})")
+        # Full config summary so every toggle is visible at a glance
+        self._log("\nArch summary:")
+        self._log(model.config_summary())
+        self._log("\nVerification PASSED")
+
+    def _verify_2d(self, sd, config):
+        """Verify a 2D MiniVAE checkpoint (unchanged from pre-refactor)."""
+        from core.model import MiniVAE
+
+        # Check key shapes
+        checks = [
+            ("encoder.0.weight", None),
+            ("encoder.17.weight", None),
+            ("decoder.1.weight", None),
+            ("decoder.22.weight", None),
+        ]
+        self._log("\nKey shapes (MiniVAE):")
+        for k, _ in checks:
+            if k in sd:
+                self._log(f"  {k}: {list(sd[k].shape)}")
+            else:
+                self._log(f"  {k}: MISSING")
+
+        self._log("\nTest forward pass (MiniVAE)...")
+        lat = config.get("latent_channels", 32)
+        enc_ch, dec_ch = parse_arch_config(config)
+        n_stages = len(dec_ch)
+        enc_t_cfg = config.get("encoder_time_downscale", None)
+        dec_t_cfg = config.get("decoder_time_upscale", None)
+        try:
+            enc_t_str = str(enc_t_cfg) if enc_t_cfg is not None else self.enc_t_var.get()
+            dec_t_str = str(dec_t_cfg) if dec_t_cfg is not None else self.dec_t_var.get()
+            enc_t = tuple(bool(int(x)) for x in enc_t_str.split(","))
+            dec_t = tuple(bool(int(x)) for x in dec_t_str.split(","))
+        except Exception:
+            self._log("Bad enc/dec time pattern in config or UI fields")
+            return
+        haar_mode = config.get("haar", "none")
+        if haar_mode is True: haar_mode = "2x"
+        elif not haar_mode or haar_mode is False: haar_mode = "none"
+        haar_rounds = {"none": 0, "2x": 1, "4x": 2}.get(haar_mode, 0)
+        base_ch = config.get("image_channels", 3)
+        if base_ch == 3 and haar_rounds > 0:
+            vae_ch = 3 * (4 ** haar_rounds)
+        else:
+            vae_ch = base_ch
+        enc_spatial, dec_spatial = _parse_spatial_config(config, n_stages)
+        model = MiniVAE(
+            latent_channels=lat, image_channels=vae_ch, output_channels=vae_ch,
+            encoder_channels=enc_ch, decoder_channels=dec_ch,
+            encoder_time_downscale=enc_t,
+            decoder_time_upscale=dec_t,
+            encoder_spatial_downscale=enc_spatial,
+            decoder_spatial_upscale=dec_spatial,
+            residual_shortcut=config.get("residual_shortcut", False),
+            use_attention=config.get("use_attention", False),
+            use_groupnorm=config.get("use_groupnorm", False),
+        )
+        model.load_state_dict(sd, strict=True)
+        model.eval()
+
+        x = torch.randn(1, 8, vae_ch, 64, 64)
+        with torch.no_grad():
+            recon, latent = model(x)
+        self._log(f"  Input:  {list(x.shape)}")
+        self._log(f"  Latent: {list(latent.shape)}")
+        self._log(f"  Recon:  {list(recon.shape)}")
+        self._log("\nVerification PASSED")
 
 
 # -- Video Generator Tab -------------------------------------------------------
@@ -1434,7 +1697,12 @@ class VideoTrainTab(tk.Frame):
             cmd += ["--resume", resume]
         if self.fresh_opt_var.get():
             cmd += ["--fresh-opt"]
-        cmd += ["--warmup-steps", str(self.warmup_steps_var.get())]
+        # Tk spinbox IntVar throws if the entry is blank — treat empty as 0.
+        try:
+            _wu = int(self.warmup_steps_var.get())
+        except (tk.TclError, ValueError):
+            _wu = 0
+        cmd += ["--warmup-steps", str(_wu)]
         if self.disco_var.get():
             cmd.append("--disco")
         if self.residual_shortcut_var.get():
@@ -1455,6 +1723,12 @@ class VideoTrainTab(tk.Frame):
         prev_T = self.preview_T_var.get()
         if prev_T > 0:
             cmd += ["--preview-T", str(prev_T)]
+        if hasattr(self, 'overfit_var'):
+            ov_path = self.overfit_vid_var.get().strip()
+            if self.overfit_var.get() and ov_path:
+                cmd += ["--overfit-video", ov_path,
+                        "--overfit-frame-skip",
+                        str(self.overfit_skip_var.get())]
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop_save(self):
@@ -1565,14 +1839,19 @@ class VideoTrain3DTab(tk.Frame):
                  bg=BG_PANEL, fg=ACCENT, font=FONT_SMALL,
                  anchor="w").pack(side="left", fill="x", expand=True)
 
-        # Architecture row
+        # Architecture row — explicit per-level widths (matches VideoTrainTab).
+        # Enc ch is shallow->deep (first conv's output width first).
+        # Dec ch is deep->shallow (first upsample's output width first).
+        # Constraint: len(Enc) == len(Dec), Dec[0] == Enc[-1] (bottleneck).
         arch_row = tk.Frame(top, bg=BG_PANEL)
         arch_row.pack(fill="x", pady=(10, 0))
         f, self.latent_var = make_spin(arch_row, "Latent ch", default=16)
         f.pack(side="left", padx=(0, 10))
-        f, self.base_ch_var = make_spin(arch_row, "Base ch", default=64)
+        f, self.enc_ch_var = make_float(arch_row, "Enc ch",
+                                        "64,128,256,256", width=18)
         f.pack(side="left", padx=(0, 10))
-        f, self.ch_mult_var = make_float(arch_row, "Ch mult", "1,2,4,4", width=12)
+        f, self.dec_ch_var = make_float(arch_row, "Dec ch",
+                                        "256,256,128,64", width=18)
         f.pack(side="left", padx=(0, 10))
         f, self.num_res_var = make_spin(arch_row, "Res blocks", default=2)
         f.pack(side="left")
@@ -1585,6 +1864,32 @@ class VideoTrain3DTab(tk.Frame):
         f, self.s_down_var = make_float(ts_row, "Spatial down", "true,true,true,true", width=22)
         f.pack(side="left", padx=(0, 10))
         f, self.T_var = make_spin(ts_row, "T (frames)", default=17)
+        f.pack(side="left")
+
+        # Arch extras row (attention / groupnorm / DC-AE residual shortcut)
+        ex_row = tk.Frame(top, bg=BG_PANEL)
+        ex_row.pack(fill="x", pady=(5, 0))
+        self.use_attention_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(ex_row, text="Attention (deepest)",
+                       variable=self.use_attention_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       activeforeground=FG, font=FONT_SMALL).pack(
+                           side="left", padx=(0, 10))
+        self.use_groupnorm_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(ex_row, text="GroupNorm",
+                       variable=self.use_groupnorm_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       activeforeground=FG, font=FONT_SMALL).pack(
+                           side="left", padx=(0, 10))
+        self.residual_shortcut_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(ex_row, text="Residual shortcut (DC-AE)",
+                       variable=self.residual_shortcut_var, bg=BG_PANEL, fg=FG,
+                       selectcolor=BG_INPUT, activebackground=BG_PANEL,
+                       activeforeground=FG, font=FONT_SMALL).pack(
+                           side="left", padx=(0, 10))
+        f, self.attn_heads_var = make_spin(ex_row, "attn heads", default=8)
+        f.pack(side="left", padx=(0, 10))
+        f, self.gn_groups_var = make_spin(ex_row, "GN groups (1/-1=auto)", default=1)
         f.pack(side="left")
 
         # Haar + FSQ row
@@ -1719,25 +2024,40 @@ class VideoTrain3DTab(tk.Frame):
 
     def _apply_preset(self, event=None):
         """Populate arch fields from the selected preset. Changes after
-        selection stick until a new preset is picked."""
+        selection stick until a new preset is picked.
+
+        Presets are still stored in common.py using the legacy base_ch +
+        ch_mult schema (by explicit user request: don't edit the presets
+        themselves). This method translates that into Enc ch / Dec ch
+        strings for the new schema: enc = base * mult (shallow->deep),
+        dec = reversed(enc) (deep->shallow)."""
         name = self.preset_var.get()
         preset = self._presets.get(name)
         if preset:
             self.latent_var.set(preset["latent_ch"])
-            self.base_ch_var.set(preset["base_ch"])
-            self.ch_mult_var.set(preset["ch_mult"])
+            base = int(preset["base_ch"])
+            mult = [int(x.strip()) for x in str(preset["ch_mult"]).split(",")]
+            enc = [base * m for m in mult]
+            dec = list(reversed(enc))
+            self.enc_ch_var.set(",".join(str(c) for c in enc))
+            self.dec_ch_var.set(",".join(str(c) for c in dec))
             self.num_res_var.set(preset["num_res_blocks"])
             self.t_down_var.set(preset["temporal_down"])
             self.s_down_var.set(preset["spatial_down"])
             self.haar_levels_var.set(preset["haar_levels"])
             self.fsq_var.set(preset["fsq"])
         self._update_dim_info()
-        # Wire live updates once
+        # Wire live updates once. T_var is in here so the per-clip label
+        # re-renders when the user changes the frames-per-clip spinner.
         if not getattr(self, "_dim_trace_wired", False):
-            for v in (self.latent_var, self.base_ch_var, self.ch_mult_var,
+            for v in (self.latent_var, self.enc_ch_var, self.dec_ch_var,
                       self.num_res_var, self.haar_levels_var,
                       self.t_down_var, self.s_down_var,
-                      self.fsq_var, self.fsq_stages_var, self.fsq_levels_var):
+                      self.fsq_var, self.fsq_stages_var, self.fsq_levels_var,
+                      self.T_var,
+                      self.use_attention_var, self.use_groupnorm_var,
+                      self.residual_shortcut_var, self.attn_heads_var,
+                      self.gn_groups_var):
                 try:
                     v.trace_add("write", lambda *a: self._update_dim_info())
                 except Exception:
@@ -1757,7 +2077,8 @@ class VideoTrain3DTab(tk.Frame):
     def _do_update_dim_info(self):
         self._dim_job = None
         try:
-            ch_mult = tuple(int(x) for x in self.ch_mult_var.get().split(","))
+            enc_ch = tuple(int(x) for x in self.enc_ch_var.get().split(","))
+            dec_ch = tuple(int(x) for x in self.dec_ch_var.get().split(","))
             t_down = tuple(x.strip().lower() in ("true", "1", "yes")
                            for x in self.t_down_var.get().split(","))
             s_down = tuple(x.strip().lower() in ("true", "1", "yes")
@@ -1769,17 +2090,44 @@ class VideoTrain3DTab(tk.Frame):
             fsq_stages = int(self.fsq_stages_var.get())
             fsq_levels = tuple(int(x) for x in self.fsq_levels_var.get().split(","))
             latent_ch = int(self.latent_var.get())
+            # Pass T (frames per clip) so the label reflects the full
+            # per-clip latent, not just a single temporal slot. For the
+            # Cosmos-Small preset (T=17, t_downscale=8), T'=ceil(17/8)=3
+            # so the real latent is 4x3x23x40 = 11,040 tokens per clip,
+            # not the 3,680 shown by the per-slot calc.
+            try:
+                T_val = int(self.T_var.get())
+            except Exception:
+                T_val = None
             d = self._estimate_dims(
                 latent_ch, s_dn, t_dn,
                 fsq=fsq, fsq_levels=fsq_levels, fsq_stages=fsq_stages,
-                H=360, W=640)
-            # Guard param count in case arch strings don't match n_levels
+                H=360, W=640, T=T_val)
+            # Guard param count in case shapes don't line up yet (user is
+            # mid-edit) — any failure just shows the dim label without
+            # param count rather than throwing.
             params = 0
-            if len(t_down) == len(ch_mult) and len(s_down) == len(ch_mult):
+            if (len(enc_ch) == len(dec_ch) == len(t_down) == len(s_down)
+                    and enc_ch[-1] == dec_ch[0]):
+                try:
+                    _use_attn = bool(self.use_attention_var.get())
+                    _use_gn = bool(self.use_groupnorm_var.get())
+                    _res_sc = bool(self.residual_shortcut_var.get())
+                    _attn_h = int(self.attn_heads_var.get())
+                    _gn_g = int(self.gn_groups_var.get())
+                except Exception:
+                    _use_attn = True; _use_gn = True; _res_sc = False
+                    _attn_h = 8; _gn_g = 1
                 params = self._estimate_params(
-                    latent_ch, int(self.base_ch_var.get()), ch_mult,
-                    int(self.num_res_var.get()),
-                    t_down, s_down, haar, fsq, fsq_levels, fsq_stages)
+                    latent_ch=latent_ch,
+                    enc_channels=enc_ch, dec_channels=dec_ch,
+                    num_res_blocks=int(self.num_res_var.get()),
+                    temporal_down=t_down, spatial_down=s_down,
+                    haar_levels=haar, fsq=fsq,
+                    fsq_levels=fsq_levels, fsq_stages=fsq_stages,
+                    use_attention=_use_attn, use_groupnorm=_use_gn,
+                    residual_shortcut=_res_sc,
+                    attn_heads=_attn_h, gn_groups=_gn_g)
             p_str = f"Params: {params/1e6:.1f}M  |  " if params else ""
             self.dim_info_var.set(p_str + d["label"])
         except Exception as e:
@@ -1794,11 +2142,17 @@ class VideoTrain3DTab(tk.Frame):
     def start(self):
         cmd = [VENV_PYTHON, "-m", "training.train_video3d",
                "--latent-ch", str(self.latent_var.get()),
-               "--base-ch", str(self.base_ch_var.get()),
-               "--ch-mult", self.ch_mult_var.get(),
+               "--enc-ch", self.enc_ch_var.get(),
+               "--dec-ch", self.dec_ch_var.get(),
                "--num-res-blocks", str(self.num_res_var.get()),
                "--temporal-down", self.t_down_var.get(),
                "--spatial-down", self.s_down_var.get(),
+               "--use-attention", str(bool(self.use_attention_var.get())).lower(),
+               "--use-groupnorm", str(bool(self.use_groupnorm_var.get())).lower(),
+               "--residual-shortcut",
+                   str(bool(self.residual_shortcut_var.get())).lower(),
+               "--attn-heads", str(self.attn_heads_var.get()),
+               "--gn-groups", str(self.gn_groups_var.get()),
                "--haar-levels", str(self.haar_levels_var.get()),
                "--fsq-levels", self.fsq_levels_var.get(),
                "--fsq-stages", str(self.fsq_stages_var.get()),
@@ -1838,6 +2192,12 @@ class VideoTrain3DTab(tk.Frame):
         prev_T = self.preview_T_var.get()
         if prev_T > 0:
             cmd += ["--preview-T", str(prev_T)]
+        if hasattr(self, 'overfit_var'):
+            ov_path = self.overfit_vid_var.get().strip()
+            if self.overfit_var.get() and ov_path:
+                cmd += ["--overfit-video", ov_path,
+                        "--overfit-frame-skip",
+                        str(self.overfit_skip_var.get())]
         self.runner.run(cmd, cwd=PROJECT_ROOT)
 
     def stop_save(self):
@@ -1911,6 +2271,10 @@ class VideoInferenceTab(tk.Frame):
         self._video_frames = []
         self._play_gen = 0
         self._video_idx = 0
+        # Cache generator across inference calls — rebuilding its shape
+        # bank every Test Synthetic click was leaking ~50-200MB VRAM
+        # per call with no way to reclaim it.
+        self._gen = None
         self.build()
 
     def build(self):
@@ -1941,6 +2305,8 @@ class VideoInferenceTab(tk.Frame):
         make_btn(row3, "Test Synthetic", self.test_synthetic, ACCENT).pack(
             side="left", padx=(0, 5))
         make_btn(row3, "Test MP4 File", self.test_mp4, BLUE).pack(
+            side="left", padx=(0, 5))
+        make_btn(row3, "Free VRAM", self.free_vram, RED).pack(
             side="left")
 
         self.status = tk.Label(top, text="No model loaded", bg=BG_PANEL,
@@ -2009,13 +2375,67 @@ class VideoInferenceTab(tk.Frame):
             self.model.load_state_dict(target_sd)
             self.model.eval()
 
+            # Record training-time T on the model so chunked inference
+            # can use it as the chunk size (rounded to a multiple of
+            # t_downscale). Fallback: 2x the model's t_downscale, min 8.
+            t_ds = getattr(self.model, "t_downscale", 1) or 1
+            trained_T = int(config.get("T", 0) or 0)
+            if trained_T <= 0:
+                trained_T = max(8, 2 * t_ds)
+            # Align to a multiple of t_downscale so chunks cover whole
+            # latent slots with no wasted frames.
+            trained_T = max(t_ds, (trained_T // t_ds) * t_ds)
+            self.model.train_T = trained_T
+
             step = ckpt.get("global_step", "?")
             pc = sum(p.numel() for p in self.model.parameters())
             self.status.config(
                 text=f"Loaded: haar={haar_mode}, in_ch={vae_in_ch}, lat={lat}, "
-                     f"temporal={temporal}, step {step}, {pc:,} params, {loaded} weights")
+                     f"temporal={temporal}, step {step}, {pc:,} params, "
+                     f"{loaded} weights, chunk_T={trained_T} (t_ds={t_ds})")
         except Exception as e:
             self.status.config(text=f"Error: {e}")
+
+    def free_vram(self):
+        """Drop model, cached generator, and loaded playback frames; then
+        force a CUDA cache flush. Use this after inference when VRAM is
+        climbing and you don't want to restart the GUI."""
+        import gc
+        import torch
+        freed = []
+        if self.model is not None:
+            del self.model
+            self.model = None
+            freed.append("model")
+        if self._gen is not None:
+            del self._gen
+            self._gen = None
+            freed.append("generator")
+        if self._video_frames:
+            # PhotoImages are CPU-side but releasing references makes
+            # the full cycle collectable.
+            self._video_frames = []
+            self._play_gen += 1       # invalidate any running playback loop
+            freed.append("playback frames")
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        self.status.config(
+            text=f"Freed: {', '.join(freed) if freed else 'nothing'}. "
+                 f"Load again to resume.")
+
+    def _get_gen(self):
+        """Lazily build + cache the inference generator. Reused across
+        every Test Synthetic click so repeated runs don't allocate a new
+        shape bank each time."""
+        if self._gen is None:
+            sys.path.insert(0, PROJECT_ROOT)
+            from core.generator import VAEpp0rGenerator
+            self._gen = VAEpp0rGenerator(
+                360, 640, device="cuda", bank_size=200, n_base_layers=64)
+            self._gen.build_banks()
+        return self._gen
 
     def test_synthetic(self):
         if self.model is None:
@@ -2026,15 +2446,11 @@ class VideoInferenceTab(tk.Frame):
         self.status.config(text=f"Generating T={T} synthetic clip...")
 
         def _bg():
+            import gc
+            import torch
+            clip = clip_rgb = x = recon = latent = recon_up = None
             try:
-                import torch
-                sys.path.insert(0, PROJECT_ROOT)
-                from core.generator import VAEpp0rGenerator
-
-                gen = VAEpp0rGenerator(360, 640, device="cuda", bank_size=200,
-                                          n_base_layers=64)
-                gen.build_banks()
-
+                gen = self._get_gen()
                 hr = self.haar_rounds
                 with torch.no_grad():
                     clip = gen.generate_sequence(1, T=T)
@@ -2047,8 +2463,10 @@ class VideoInferenceTab(tk.Frame):
                 T_in = x.shape[1]
                 gt = clip_rgb[0, trim:trim + T_out, :3].float().cpu().numpy()
                 if hr > 0:
-                    recon_up = haar_up_video(recon.cuda() if not recon.is_cuda else recon, hr)
+                    recon_cu = recon.cuda() if not recon.is_cuda else recon
+                    recon_up = haar_up_video(recon_cu, hr)
                     rc = recon_up[0, :, :3].clamp(0, 1).float().cpu().numpy()
+                    del recon_cu
                 else:
                     rc = recon[0, :, :3].clamp(0, 1).float().cpu().numpy()
 
@@ -2059,6 +2477,15 @@ class VideoInferenceTab(tk.Frame):
                 import traceback; traceback.print_exc()
                 _e = str(e)
                 self.after(0, lambda: self.status.config(text=f"Error: {_e}"))
+            finally:
+                # Explicit drop of every GPU-touching local so the next
+                # inference starts with a clean allocator state.
+                for v in (clip, clip_rgb, x, recon, latent, recon_up):
+                    if v is not None:
+                        del v
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         threading.Thread(target=_bg, daemon=True).start()
 
@@ -2105,10 +2532,13 @@ class VideoInferenceTab(tk.Frame):
                 T_in = clip.shape[1]
                 gt = clip_rgb[0, trim:trim + T_out, :3].float().cpu().numpy()
                 if hr > 0:
-                    recon_up = haar_up_video(recon.cuda() if not recon.is_cuda else recon, hr)
+                    recon_cu = recon.cuda() if not recon.is_cuda else recon
+                    recon_up = haar_up_video(recon_cu, hr)
                     rc = recon_up[0, :, :3].clamp(0, 1).float().cpu().numpy()
+                    del recon_cu
                 else:
                     rc = recon[0, :, :3].clamp(0, 1).float().cpu().numpy()
+                    recon_up = None
 
                 self.after(0, lambda: self.status.config(
                     text=f"Input T={T_in}, Recon T={T_out}, trim={trim}"))
@@ -2117,6 +2547,14 @@ class VideoInferenceTab(tk.Frame):
                 import traceback; traceback.print_exc()
                 _e = str(e)
                 self.after(0, lambda: self.status.config(text=f"Error: {_e}"))
+            finally:
+                import gc
+                for name in ("clip_rgb", "clip", "recon", "latent", "recon_up"):
+                    if name in locals():
+                        locals()[name] = None  # help the gc
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
         threading.Thread(target=_bg, daemon=True).start()
 
